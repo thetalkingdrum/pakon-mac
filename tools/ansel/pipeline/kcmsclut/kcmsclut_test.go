@@ -91,6 +91,75 @@ func TestTetraDistribution(t *testing.T) {
 	}
 }
 
+// TestOtabMonotoneSteps is what makes EvalU16's blend safe in the first
+// place: otab is captured, real vendor data (kodakcms.dll's own memory), not
+// something this port built to be smooth, so its monotonicity is a fact to
+// check, not a design choice to assume. Confirmed here to hold everywhere,
+// in steps of 0 or 1 byte, never more and never negative.
+func TestOtabMonotoneSteps(t *testing.T) {
+	for ch := 0; ch < 3; ch++ {
+		for i := 1; i < len(otab[ch]); i++ {
+			d := int(otab[ch][i]) - int(otab[ch][i-1])
+			if d < 0 || d > 1 {
+				t.Fatalf("otab[%d][%d]-otab[%d][%d] = %d, want 0 or 1",
+					ch, i, ch, i-1, d)
+			}
+		}
+	}
+}
+
+// TestEvalU16BoundedByU8 is the real correctness property for EvalU16, and it
+// needs no reference capture to check: EvalU16's own construction guarantees
+// EvalU8(in)*257 <= EvalU16(in) <= EvalU8(in)*257 + 257 for every input,
+// because otab is monotone in steps of 0 or 1 (TestOtabMonotoneSteps above)
+// and EvalU16 only ever blends EvalU8's own floor sample toward the very
+// next one. A transcription bug that reached past that bracket — e.g. using
+// the wrong table, or a sign error in frac — would show up here across the
+// whole domain, not just at a few vectors.
+func TestEvalU16BoundedByU8(t *testing.T) {
+	var in [3]uint8
+	for r := 0; r < 256; r++ {
+		in[0] = uint8(r)
+		for g := 0; g < 256; g++ {
+			in[1] = uint8(g)
+			for b := 0; b < 256; b++ {
+				in[2] = uint8(b)
+				u8 := EvalU8(in)
+				u16 := EvalU16(in)
+				for ch := 0; ch < 3; ch++ {
+					lo := uint32(u8[ch]) * 257
+					hi := lo + 257
+					got := uint32(u16[ch])
+					if got < lo || got > hi {
+						t.Fatalf("EvalU16(%v)[%d] = %d, want in [%d, %d] "+
+							"(EvalU8 = %d)", in, ch, got, lo, hi, u8[ch])
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestEvalU16ExactAtWholeSteps: wherever the interpolation fraction is
+// exactly zero (t&0x3fff == 0 for every channel), EvalU16 must reproduce
+// EvalU8 exactly, widened by the standard ICC 8-to-16 relation — that is the
+// "reproduces the real vendor byte exactly at real sample points" claim
+// EvalU16's own docstring makes, checked rather than assumed. {0,0,0} always
+// lands exactly on a grid corner (t == 0 in every channel by construction),
+// so it is a guaranteed, not a hoped-for, whole-step vector.
+func TestEvalU16ExactAtWholeSteps(t *testing.T) {
+	in := [3]uint8{0, 0, 0}
+	u8 := EvalU8(in)
+	u16 := EvalU16(in)
+	for ch := 0; ch < 3; ch++ {
+		want := uint16(u8[ch]) * 257
+		if u16[ch] != want {
+			t.Errorf("EvalU16(%v)[%d] = %d, want exactly %d (EvalU8*257)",
+				in, ch, u16[ch], want)
+		}
+	}
+}
+
 func TestRpd12ToU8(t *testing.T) {
 	// clip(rint(code*255/4095), 0, 255), per pakon_ansel.rpd12_to_icc_u8.
 	for _, c := range []struct {

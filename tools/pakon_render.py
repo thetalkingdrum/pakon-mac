@@ -1657,6 +1657,20 @@ def _render_colour_go(roll: Roll, seg: np.ndarray, p: dict) -> np.ndarray:
     return gocol.render(seg, req)
 
 
+def _render_colour_go16(roll: Roll, seg: np.ndarray, p: dict) -> np.ndarray:
+    """``_render_colour_go``'s 16-bit counterpart (``gocol.render16``) — see
+    ``kcmsclut.EvalU16``'s docstring for exactly what "16-bit" means here.
+    Export-only: nothing in the interactive preview/contact-sheet path needs
+    more than 8 bits, so this is not reached from ``render_frame``.
+    """
+    req = _go_request(roll, p)
+    if not roll.colour_selection:
+        roll.colour_selection = gocol.open_selection(req)
+        if correction_steps(p).any():
+            req = _go_request(roll, p)
+    return gocol.render16(seg, req)
+
+
 def _render_colour_python(roll: Roll, seg: np.ndarray, p: dict) -> np.ndarray:
     """DEPRECATED. The Python colour chain, behind PAKON_COLOUR_ENGINE=python.
 
@@ -1803,17 +1817,28 @@ def render_name(template: str, roll: Roll, index: int, ext: str) -> str:
 
 #: Which (format, colour) pairs can honestly carry more than 8 bits.
 #:
-#: The sRGB path ends in ``AnselEngine.to_srgb``, which calls
-#: ``rpd12_to_icc_u8`` and runs the ICC transform on 8-bit RGB. Its output
-#: therefore *is* 8-bit. Writing it into a 16-bit container by replicating
-#: bytes would advertise depth that does not exist, so 16-bit is offered only
-#: on the Linear/RPD path, which is genuinely 16-bit all the way through this
-#: port's own pipeline. That is not a claim that the real vendor software
-#: ever wrote a 16-bit file of its own — it measurably did not, even on this
-#: same stage (see the "Save As Raw" comment in ``export_frame`` below for the
-#: real vendor file this was checked against).
+#: The default sRGB path ends in the vendor-matched ICC evaluator
+#: (``kcmsclut.EvalU8`` / ``pakon_kcms_clut.evaluate``), whose own captured
+#: output table is 8-bit — that is the real vendor CMM's own ceiling, not a
+#: quantisation this port chose. Writing IT into a 16-bit container by
+#: replicating bytes would advertise depth that does not exist.
+#:
+#: "srgb16" is different: it is ``kcmsclut.EvalU16`` (docs: its own
+#: docstring), which blends between the SAME real captured vendor bytes
+#: instead of floor-snapping to one, giving a genuinely smoother — not
+#: independently vendor-verified above 8 bits, but not invented either —
+#: 16-bit result. See docs/74 (16-bit sRGB export) for the full reasoning.
+#:
+#: "linear" is a third, unrelated thing: the pre-tone/pre-ICC RPD16 stage-2
+#: output, genuinely 16-bit all the way through this port's own pipeline. Not
+#: a claim that the real vendor software ever wrote a 16-bit file of its own
+#: — it measurably did not, even on this stage (see the "Save As Raw" comment
+#: in ``export_frame`` below for the real vendor file this was checked
+#: against).
 def depth_options(colour: str) -> list[int]:
-    return [16, 8] if colour == "linear" else [8]
+    if colour in ("linear", "srgb16"):
+        return [16]
+    return [8]
 
 
 #: What to do when the file an export would write already exists.
@@ -1837,7 +1862,9 @@ def export_path(roll: Roll, index: int, dest: Path, fmt: str,
     """Where ``export_frame`` would write. Pure — touches no file."""
     ext = {"tiff": "tif", "jpeg": "jpg", "png": "png"}.get(fmt, "tif")
     out = dest / render_name(template, roll, index, ext)
-    return out.with_suffix(".tif") if colour == "linear" else out
+    # Both 16-bit modes are TIFF-only: uint16 has no honest JPEG/PNG
+    # container in this pipeline's own writers.
+    return out.with_suffix(".tif") if colour in ("linear", "srgb16") else out
 
 
 def unique_path(out: Path, taken: set | None = None) -> Path:
@@ -1970,6 +1997,29 @@ def export_frame(roll: Roll, index: int, dest: Path, fmt: str = "tiff",
         h, w = img16.shape[:2]
         pc.write_tiff(str(out), w, h,
                       np.ascontiguousarray(img16).astype("<u2").tobytes())
+    elif colour == "srgb16":
+        # kcmsclut.EvalU16, via the Go engine only — this is real Go pipeline
+        # work (main.go's per-pixel loop, RenderRequest.Want16), not the
+        # deprecated Python colour chain, which must not gain features (see
+        # _render_colour_python's own docstring, docs/62 §12).
+        #
+        # The vendor's own per-frame correction (density/red/green/blue,
+        # UserOffsets) is applied, same as every other export mode. The
+        # cosmetic brightness/contrast/saturation/sharpening knobs are NOT:
+        # those are PIL ImageEnhance operations, and Pillow has no 16-bit
+        # multi-channel RGB mode to run them in (the same limitation that
+        # made this feature need a Go implementation instead of extending
+        # the Python/lcms path in the first place) — same omission the
+        # "linear" branch above already makes, for the same reason: this is
+        # the vendor-corrected data, not the cosmetic-adjusted preview.
+        seg = roll.slice14(f.a, f.b, 1)
+        srgb16 = _render_colour_go16(roll, seg, p)
+        img16 = _apply_geometry(
+            dec.to_frame_image(srgb16, roll.transport_scale), p)
+        out = out.with_suffix(".tif")
+        h, w = img16.shape[:2]
+        pc.write_tiff(str(out), w, h,
+                      np.ascontiguousarray(img16).astype("<u2").tobytes())
     else:
         img = render_frame(roll, index, p, scale="full")   # 8-bit by nature
         from PIL import Image
@@ -1984,7 +2034,7 @@ def export_frame(roll: Roll, index: int, dest: Path, fmt: str = "tiff",
     size = out.stat().st_size if out.is_file() else 0
     f.exported = str(out)
     return {"path": str(out), "bytes": size, "frame": index,
-            "depth": 16 if colour == "linear" else 8}
+            "depth": 16 if colour in ("linear", "srgb16") else 8}
 
 
 # --------------------------------------------------------------------------
