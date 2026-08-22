@@ -2397,8 +2397,7 @@ class H(_BASE):                                     # type: ignore[misc,valid-ty
             return _json(self, calibration_select(body))
 
         if route == "calibration/run":
-            jid = S.job_new("calibration")
-            started = calibration_run(jid, body)
+            started = calibration_run(body)
             if "error" in started:
                 return _json(self, started, 409)
             return _json(self, started)
@@ -2808,7 +2807,7 @@ def calibration_store_state() -> dict:
         return {"available": False, "reason": str(e)}
 
 
-def calibration_run(jid: str, body: dict) -> dict:
+def calibration_run(body: dict) -> dict:
     """Start the unattended calibration as a background job.
 
     A job, not a synchronous call: the searches take minutes and a blocking
@@ -2830,6 +2829,21 @@ def calibration_run(jid: str, body: dict) -> dict:
     film sensors and the gate classifier are not symmetric signals -- and comes
     back in the ``film-in-gate`` state, which is one sentence on screen and no
     control.
+
+    The job is minted here, AFTER every guard passes, not by the caller ahead
+    of time. It used to be the other way around (``S.job_new`` called by the
+    route handler before this function ran at all): that job existed in
+    ``S.jobs`` with ``status="running"`` from the moment it was created, so
+    guard 3's own busy-scan always found it -- ITSELF -- and refused every
+    single call, including the very first one on a freshly-started backend
+    (confirmed live: a bare ``POST /api/app/calibration/run`` against a
+    process that had never run a calibration still came back 409 "A
+    calibration is already running."). Worse, a refusal from guard 1, 2 or 4
+    left that phantom "running" job in ``S.jobs`` forever -- nothing ever
+    marked it done or errored -- so it also permanently blocked every later
+    call for the rest of the process's life, not just the one that tripped
+    it. Not minting the id until a real job is actually about to start closes
+    both holes at once.
     """
     if calib is None or cwiz is None:
         return {"error": "calibration tools unavailable"}
@@ -2854,6 +2868,7 @@ def calibration_run(jid: str, body: dict) -> dict:
         return {"error": "More than one scanner has been calibrated here. "
                          "Choose which one is plugged in first."}
 
+    jid = S.job_new("calibration")
     S.job_set(jid, kind="calibration", status="running", progress=0.0,
               phase=cwiz.STEP_GATE, message=cwiz.HEADLINES[cwiz.RUNNING],
               state=cwiz.RUNNING, steps=setup["steps"], cancellable=False)
