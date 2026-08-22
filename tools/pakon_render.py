@@ -823,6 +823,75 @@ def _resolve_dx_stock(roll: "Roll", dx: str | None,
             f"stock-specific curves are not being used.")
 
 
+def _measure_film_base_from_tlx(rgb14: np.ndarray, data_dir: str, model: str,
+                                film_class: int, capture_label: str,
+                                ) -> tuple[list[float], dict, str | None]:
+    """FindDmin over a TLX-imported frame's own content — the maths shared by
+    ``open_tlx_capture``'s auto-measure path and ``measure_tlx_film_base``'s
+    standalone "measure from a different frame" endpoint. One place, so the
+    two can never quietly disagree on what "the film base" means.
+    """
+    r16 = _rpd16(rgb14, data_dir, np.zeros(3), model=model,
+                film_class=film_class)
+    lin12 = ansel.rpd16_to_rpd12(r16, pc.RPD_MAX_BY_MODEL[model])
+    base, win = dec.film_base_codes(lin12, capture=capture_label)
+    base = [float(v) for v in base]
+    warning = None
+    if any(v <= 0 for v in base):
+        # 0 is FindDmin's "no valid Dmin" sentinel — see dec.film_base_codes.
+        pct = win.get("clip_pct", [0.0, 0.0, 0.0])
+        warning = (
+            f"FindDmin found no film base {[int(v) for v in base]} over "
+            f"columns {win.get('col0')}.., {win.get('lines_kept')} of "
+            f"{win.get('lines_total')} lines — {pct[0]:.3f}% / {pct[1]:.3f}% "
+            f"/ {pct[2]:.3f}% of pixels still at the 4095 ceiling.")
+    return base, win, warning
+
+
+def measure_tlx_film_base(path: str | Path, film_path: str = "ColNeg",
+                          model: str = pc.DEFAULT_MODEL,
+                          data_dir: str | None = None,
+                          progress=lambda *a: None) -> dict:
+    """FindDmin on a TLX raw export, standalone — no Roll, no workspace, no
+    render cache written.
+
+    For "measure the film base from a different frame than the one being
+    inverted" (docs/77 §3, §6): a TLX export that genuinely contains clear
+    film (a leader frame, a blank shot) can be measured once here, and the
+    result typed into another TLX open's ``film_base`` override — instead of
+    trusting FindDmin on a frame that may be entirely photographic content
+    and has no real clear-film margin of its own (the failure mode docs/77
+    §3 documents). ``film_path`` only selects the density-matrix film class
+    (``pakon_color.film_class_for_path``) — it does not need to match the
+    frame(s) this measurement will be applied to, since film class is a
+    per-stock-family constant, not a per-frame one.
+    """
+    import pakon_tlx_raw as tlx
+
+    src = Path(path).resolve()
+    if not src.is_file():
+        raise FileNotFoundError(f"file not found: {path}")
+    data_dir = data_dir or dec.DEFAULT_DATA_DIR
+    fclass = pc.film_class_for_path(film_path)
+
+    progress("reading", 0.1, f"reading {src.name}")
+    rgb14 = tlx.load_tlx_planar_raw(src)
+
+    progress("film-base", 0.5, "measuring film base (FindDmin)")
+    base, win, warning = _measure_film_base_from_tlx(
+        rgb14, data_dir, model, fclass, str(src))
+
+    progress("done", 1.0, "measured")
+    return {
+        "film_base": base,
+        "warning": warning,
+        "clip_pct": win.get("clip_pct"),
+        "lines_kept": win.get("lines_kept"),
+        "lines_total": win.get("lines_total"),
+        "col0": win.get("col0"),
+    }
+
+
 def open_tlx_capture(path: str | Path, workspace: str | Path, roll_id: str,
                      name: str | None = None, dx: str | None = None,
                      progress=lambda *a: None,
@@ -927,23 +996,16 @@ def open_tlx_capture(path: str | Path, workspace: str | Path, roll_id: str,
     elif roll.model == "f135" and roll.has_film():
         progress("film-base", 0.8, "measuring film base (FindDmin)")
         fclass = roll.film_class()
-        r16 = _rpd16(rgb14, roll.data_dir, np.zeros(3), model=roll.model,
-                    film_class=fclass)
-        lin12 = ansel.rpd16_to_rpd12(r16, pc.RPD_MAX_BY_MODEL[roll.model])
-        base, win = dec.film_base_codes(lin12, capture=str(src))
-        roll.film_base = [float(v) for v in base]
-        if any(v <= 0 for v in roll.film_base):
+        base, win, warning = _measure_film_base_from_tlx(
+            rgb14, roll.data_dir, roll.model, fclass, str(src))
+        roll.film_base = base
+        if warning:
             # Same sentinel/refusal condition open_capture() warns about —
             # see its own comment for what 0 means and why it warns rather
             # than refuses here.
-            pct = win.get("clip_pct", [0.0, 0.0, 0.0])
             roll.warnings.append(
-                f"FindDmin found no film base {[int(v) for v in roll.film_base]} "
-                f"over columns {win.get('col0')}.., {win.get('lines_kept')} of "
-                f"{win.get('lines_total')} lines — {pct[0]:.3f}% / {pct[1]:.3f}% "
-                f"/ {pct[2]:.3f}% of pixels still at the 4095 ceiling. "
-                f"Colour will refuse to render until this resolves.")
-        del r16, lin12
+                f"{warning} Colour will refuse to render until this "
+                f"resolves.")
 
     progress("done", 1.0, "ready")
     return roll

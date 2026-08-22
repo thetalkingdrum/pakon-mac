@@ -12,6 +12,31 @@ const FILM_PATHS = [
   ['IMPORTED', 'Imported'],
 ];
 
+// The most recent "Measure from file…" reading, kept across dialog opens and
+// app restarts (localStorage, this machine only) so a film base measured
+// once from a roll's clear-film frame doesn't have to be re-measured or
+// re-typed for every other frame of that same roll. Shown as info only —
+// never auto-filled into a new open's field, since a stale reading silently
+// applied to an unrelated roll would be worse than retyping it.
+const LAST_TLX_FILM_BASE_KEY = 'pakon:lastTlxFilmBase';
+
+function readLastTlxFilmBase() {
+  try {
+    const raw = localStorage.getItem(LAST_TLX_FILM_BASE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastTlxFilmBase(entry) {
+  try {
+    localStorage.setItem(LAST_TLX_FILM_BASE_KEY, JSON.stringify(entry));
+  } catch {
+    /* private window, storage disabled — the info line just won't persist */
+  }
+}
+
 export function OpenDialog({ open, onClose, onOpened, captures }) {
   const [path, setPath] = useState('');
   const [name, setName] = useState('');
@@ -21,7 +46,12 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
   const [film, setFilm] = useState(null);
   const [job, setJob] = useState(null);
   const [error, setError] = useState(null);
+  const [measureJob, setMeasureJob] = useState(null);
+  const [measureError, setMeasureError] = useState(null);
+  const [measureSrc, setMeasureSrc] = useState('');
+  const [lastMeasured, setLastMeasured] = useState(null);
   const busy = job && job.status === 'running';
+  const measuring = measureJob && measureJob.status === 'running';
   const isTlx = /\.raw$/i.test(path.trim());
   const filmBaseParts = filmBase.trim()
     ? filmBase.split(',').map((v) => v.trim()).filter(Boolean)
@@ -30,12 +60,49 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
     && (filmBaseParts.length !== 3 || filmBaseParts.some((v) => Number.isNaN(Number(v))));
 
   useEffect(() => {
-    if (!open) {
+    if (open) {
+      setLastMeasured(readLastTlxFilmBase());
+    } else {
       setJob(null);
       setError(null);
       setFilmBase('');
+      setMeasureJob(null);
+      setMeasureError(null);
+      setMeasureSrc('');
     }
   }, [open]);
+
+  async function measureFromFile() {
+    const p = await window.pakon?.openCapture();
+    if (!p) return;
+    setMeasureError(null);
+    setMeasureSrc(p.split('/').pop());
+    try {
+      const { id } = await api.measureTlxFilmBase({ path: p, film_path: filmPath });
+      const final = await api.pollJob(id, setMeasureJob, 300);
+      if (final.status === 'error') {
+        setMeasureError(final.error);
+        setMeasureJob(null);
+        return;
+      }
+      const { film_base, warning } = final.result || {};
+      if (warning) {
+        // FindDmin's own "no valid Dmin" sentinel on THIS file too — don't
+        // fill the field with a zeroed-out reading, that would silently
+        // undo the whole point of choosing a different frame.
+        setMeasureError(warning);
+      } else if (film_base) {
+        const value = film_base.map((v) => Math.round(v)).join(',');
+        setFilmBase(value);
+        const entry = { value, src: p.split('/').pop(), ts: Date.now() };
+        setLastMeasured(entry);
+        writeLastTlxFilmBase(entry);
+      }
+    } catch (e) {
+      setMeasureError(String(e.message || e));
+      setMeasureJob(null);
+    }
+  }
 
   useEffect(() => {
     if (!dx.trim()) return setFilm(null);
@@ -181,19 +248,43 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
         {isTlx ? (
           <div className="field" style={{ marginBottom: 12 }}>
             <span className="lbl">Film base override (R,G,B) — optional</span>
-            <input
-              className="inp"
-              value={filmBase}
-              onChange={(e) => setFilmBase(e.target.value)}
-              placeholder="e.g. 3034,1918,2087 — leave blank to measure from this frame"
-              spellCheck={false}
-            />
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                className="inp"
+                value={filmBase}
+                onChange={(e) => setFilmBase(e.target.value)}
+                placeholder="e.g. 3034,1918,2087 — leave blank to measure from this frame"
+                spellCheck={false}
+              />
+              <Btn variant="flat" disabled={measuring || busy} onClick={measureFromFile}>
+                {measuring ? 'Measuring…' : 'Measure from file…'}
+              </Btn>
+            </div>
             <span style={{ fontSize: 11, color: 'var(--faint)', marginTop: 4, display: 'block' }}>
               This is a single vendor-cropped frame with no clear-film margin, so the
               automatic measurement can mistake a bright real subject (sunlit glass, snow,
               sky) for clear film and wash the whole render out. If you have a known-good
-              base from another frame of this roll/stock, type it in here.
+              base from another frame of this roll/stock, type it in above, or pick that
+              other TLX export with "Measure from file…" and FindDmin will read it for you.
             </span>
+            {lastMeasured && !measureSrc ? (
+              <div className="rows" style={{ marginTop: 6, padding: '6px 9px', display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
+                <span style={{ flex: 1, color: 'var(--faint)' }}>
+                  Last measured: <span className="num">{lastMeasured.value}</span> from{' '}
+                  {lastMeasured.src} · {api.fmtDate(lastMeasured.ts / 1000)}
+                </span>
+                <Btn variant="flat" onClick={() => setFilmBase(lastMeasured.value)}>Use</Btn>
+              </div>
+            ) : null}
+            {measureError ? (
+              <span style={{ fontSize: 11, color: 'var(--danger-ink)', marginTop: 4, display: 'block' }}>
+                {measureSrc ? `${measureSrc}: ` : ''}{measureError}
+              </span>
+            ) : measureJob && measureJob.status === 'done' && filmBase ? (
+              <span style={{ fontSize: 11, color: 'var(--ok-ink)', marginTop: 4, display: 'block' }}>
+                Measured from {measureSrc}.
+              </span>
+            ) : null}
             {filmBaseInvalid ? (
               <span style={{ fontSize: 11, color: 'var(--danger-ink)', marginTop: 4, display: 'block' }}>
                 Needs exactly three numbers, comma-separated.
@@ -208,20 +299,20 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
           </div>
         ) : null}
 
-        {busy ? (
+        {busy || measuring ? (
           <div style={{ marginBottom: 12 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 5 }}>
-              <Spinner>{job.phase}</Spinner>
+              <Spinner>{busy ? job.phase : measureJob.phase}</Spinner>
             </div>
             <div className="bar warnfill">
-              <i style={{ width: `${(job.progress || 0) * 100}%` }} />
+              <i style={{ width: `${((busy ? job.progress : measureJob.progress) || 0) * 100}%` }} />
             </div>
           </div>
         ) : null}
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <Btn variant="flat" disabled={busy} onClick={onClose}>Cancel</Btn>
-          <Btn variant="primary" disabled={!path || busy || (!!dx.trim() && !film) || filmBaseInvalid} onClick={go}>
+          <Btn variant="flat" disabled={busy || measuring} onClick={onClose}>Cancel</Btn>
+          <Btn variant="primary" disabled={!path || busy || measuring || (!!dx.trim() && !film) || filmBaseInvalid} onClick={go}>
             {busy ? 'Opening…' : 'Open'}
           </Btn>
         </div>

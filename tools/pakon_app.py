@@ -907,6 +907,34 @@ def job_open_tlx(jid: str, body: dict) -> None:
                   trace=traceback.format_exc()[-2000:])
 
 
+def job_tlx_measure_film_base(jid: str, body: dict) -> None:
+    """FindDmin on a TLX raw export, standalone (``pr.measure_tlx_film_base``)
+    — no roll opened, nothing written to the workspace. For "measure the
+    film base from a different frame than the one being inverted" (docs/77
+    §3, §6): a clear-film frame is measured here once, and the R,G,B result
+    is meant to be typed into another TLX open's ``film_base`` override, not
+    used to open this file itself.
+    """
+    try:
+        path = body.get("path")
+        if not path:
+            raise ValueError("no capture path")
+
+        def prog(phase, frac, msg):
+            S.job_set(jid, phase=phase, progress=float(frac), message=msg)
+
+        result = pr.measure_tlx_film_base(
+            path,
+            film_path=(body.get("film_path") or "ColNeg").strip(),
+            progress=prog,
+        )
+        S.job_set(jid, status="done", progress=1.0, phase="done",
+                  message="measured", result=result)
+    except Exception as e:                                  # noqa: BLE001
+        S.job_set(jid, status="error", error=f"{e}",
+                  trace=traceback.format_exc()[-2000:])
+
+
 def export_request(body: dict) -> tuple:
     """Everything both the plan and the write need, worked out exactly once.
 
@@ -2302,6 +2330,12 @@ class H(_BASE):                                     # type: ignore[misc,valid-ty
         if route == "open_tlx":
             jid = S.job_new("open_tlx")
             threading.Thread(target=job_open_tlx, args=(jid, body),
+                             daemon=True).start()
+            return _json(self, {"id": jid})
+
+        if route == "tlx_measure_film_base":
+            jid = S.job_new("tlx_measure_film_base")
+            threading.Thread(target=job_tlx_measure_film_base, args=(jid, body),
                              daemon=True).start()
             return _json(self, {"id": jid})
 
