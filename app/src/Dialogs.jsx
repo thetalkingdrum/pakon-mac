@@ -17,15 +17,23 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
   const [name, setName] = useState('');
   const [filmPath, setFilmPath] = useState('ColNeg');
   const [dx, setDx] = useState('');
+  const [filmBase, setFilmBase] = useState('');
   const [film, setFilm] = useState(null);
   const [job, setJob] = useState(null);
   const [error, setError] = useState(null);
   const busy = job && job.status === 'running';
+  const isTlx = /\.raw$/i.test(path.trim());
+  const filmBaseParts = filmBase.trim()
+    ? filmBase.split(',').map((v) => v.trim()).filter(Boolean)
+    : [];
+  const filmBaseInvalid = filmBaseParts.length > 0
+    && (filmBaseParts.length !== 3 || filmBaseParts.some((v) => Number.isNaN(Number(v))));
 
   useEffect(() => {
     if (!open) {
       setJob(null);
       setError(null);
+      setFilmBase('');
     }
   }, [open]);
 
@@ -39,11 +47,13 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
   async function go() {
     setError(null);
     try {
-      const { id } = await api.openCapture({
+      const openFn = isTlx ? api.openTlxCapture : api.openCapture;
+      const { id } = await openFn({
         path,
         name: name.trim() || undefined,
         film_path: filmPath,
         dx: dx.trim() || undefined,
+        ...(isTlx ? { film_base: filmBase.trim() || undefined } : {}),
       });
       const final = await api.pollJob(id, setJob, 300);
       if (final.status === 'error') {
@@ -75,7 +85,7 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
               className="inp"
               value={path}
               onChange={(e) => setPath(e.target.value)}
-              placeholder="/path/to/capture.bin"
+              placeholder="/path/to/capture.bin or TLX export.raw"
               spellCheck={false}
             />
             <Btn
@@ -84,7 +94,7 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
                 const p = await window.pakon?.openCapture();
                 if (p) {
                   setPath(p);
-                  if (!name) setName(p.split('/').pop().replace(/\.bin$/, ''));
+                  if (!name) setName(p.split('/').pop().replace(/\.(bin|raw)$/i, ''));
                 }
               }}
             >
@@ -168,6 +178,30 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
           </div>
         )}
 
+        {isTlx ? (
+          <div className="field" style={{ marginBottom: 12 }}>
+            <span className="lbl">Film base override (R,G,B) — optional</span>
+            <input
+              className="inp"
+              value={filmBase}
+              onChange={(e) => setFilmBase(e.target.value)}
+              placeholder="e.g. 3034,1918,2087 — leave blank to measure from this frame"
+              spellCheck={false}
+            />
+            <span style={{ fontSize: 11, color: 'var(--faint)', marginTop: 4, display: 'block' }}>
+              This is a single vendor-cropped frame with no clear-film margin, so the
+              automatic measurement can mistake a bright real subject (sunlit glass, snow,
+              sky) for clear film and wash the whole render out. If you have a known-good
+              base from another frame of this roll/stock, type it in here.
+            </span>
+            {filmBaseInvalid ? (
+              <span style={{ fontSize: 11, color: 'var(--danger-ink)', marginTop: 4, display: 'block' }}>
+                Needs exactly three numbers, comma-separated.
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
         {error ? (
           <div style={{ background: 'var(--danger-flat)', color: 'var(--danger-ink)', borderRadius: 'var(--r-sm)', padding: '9px 11px', marginBottom: 12, fontSize: 12 }}>
             {error}
@@ -187,7 +221,7 @@ export function OpenDialog({ open, onClose, onOpened, captures }) {
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <Btn variant="flat" disabled={busy} onClick={onClose}>Cancel</Btn>
-          <Btn variant="primary" disabled={!path || busy || (!!dx.trim() && !film)} onClick={go}>
+          <Btn variant="primary" disabled={!path || busy || (!!dx.trim() && !film) || filmBaseInvalid} onClick={go}>
             {busy ? 'Opening…' : 'Open'}
           </Btn>
         </div>

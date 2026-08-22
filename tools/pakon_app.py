@@ -819,6 +819,74 @@ def job_open(jid: str, body: dict) -> None:
                   trace=traceback.format_exc()[-2000:])
 
 
+def job_open_tlx(jid: str, body: dict) -> None:
+    """Open a Kodak TLX client planar RAW export (tools/pakon_tlx_raw.py).
+
+    Mirrors job_open()'s shape (roll id, workspace, sidecar, S.rolls) so
+    everything downstream — the frame list, param edits, export — is the
+    same code whether the roll came from a .bin or a TLX export. What it
+    does NOT do is job_open()'s .bin-specific front matter: there is no
+    sync stream to probe_channels(), and no scan .dx.json/.scan.json
+    sidecar convention for a file that never came off this project's own
+    scanner, so film selection here is exactly what the Open dialog sent —
+    no recorded-DX fallback to reach for.
+    """
+    try:
+        path = body.get("path")
+        if not path:
+            raise ValueError("no capture path")
+        src = Path(path)
+        if not src.is_file():
+            raise FileNotFoundError(f"file not found: {path}")
+
+        roll_id = uuid.uuid4().hex[:8]
+
+        def prog(phase, frac, msg):
+            S.job_set(jid, phase=phase, progress=float(frac), message=msg)
+
+        dx_spec = (body.get("dx") or "").strip() or None
+        film_path = (body.get("film_path") or "").strip() or None
+        refuse_film_choice(film_path, dx_spec)
+
+        film_base = None
+        fb_spec = (body.get("film_base") or "").strip()
+        if fb_spec:
+            try:
+                parts = [float(v.strip()) for v in fb_spec.split(",")]
+            except ValueError:
+                raise ValueError(
+                    f"film_base {fb_spec!r} is not three comma-separated "
+                    f"numbers (R,G,B)")
+            if len(parts) != 3:
+                raise ValueError(
+                    f"film_base needs exactly 3 values (R,G,B), got "
+                    f"{len(parts)}: {fb_spec!r}")
+            film_base = tuple(parts)
+
+        roll = pr.open_tlx_capture(
+            src, WORKSPACE, roll_id,
+            name=body.get("name"),
+            dx=dx_spec,
+            dx_source=("typed" if dx_spec else ""),
+            film_path=film_path,
+            sba_key=body.get("sba_key") or None,
+            sba_default=bool(body.get("sba_default")),
+            film_base=film_base,
+            progress=prog,
+        )
+        meta_path = Path(roll.workspace) / "roll.json"
+        meta_path.write_text(json.dumps(roll.to_json(), indent=1))
+        save_sidecar(roll)
+        with S.lock:
+            S.rolls[roll.id] = roll
+        S._roll_mtime[roll.id] = meta_path.stat().st_mtime
+        S.job_set(jid, status="done", progress=1.0, phase="done",
+                  message=f"{len(roll.frames)} frames", roll=roll.id)
+    except Exception as e:                                  # noqa: BLE001
+        S.job_set(jid, status="error", error=f"{e}",
+                  trace=traceback.format_exc()[-2000:])
+
+
 def export_request(body: dict) -> tuple:
     """Everything both the plan and the write need, worked out exactly once.
 
@@ -2188,6 +2256,12 @@ class H(_BASE):                                     # type: ignore[misc,valid-ty
         if route == "open":
             jid = S.job_new("open")
             threading.Thread(target=job_open, args=(jid, body),
+                             daemon=True).start()
+            return _json(self, {"id": jid})
+
+        if route == "open_tlx":
+            jid = S.job_new("open_tlx")
+            threading.Thread(target=job_open_tlx, args=(jid, body),
                              daemon=True).start()
             return _json(self, {"id": jid})
 

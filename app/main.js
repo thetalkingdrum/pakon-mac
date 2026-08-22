@@ -168,7 +168,9 @@ ipcMain.handle('open-capture', async () => {
     title: 'Open capture',
     ...(defaultPath ? { defaultPath } : {}),
     filters: [
+      { name: 'Pakon capture or TLX RAW', extensions: ['bin', 'raw'] },
       { name: 'Pakon capture', extensions: ['bin'] },
+      { name: 'Kodak TLX client RAW', extensions: ['raw'] },
       { name: 'All files', extensions: ['*'] },
     ],
     properties: ['openFile'],
@@ -220,7 +222,7 @@ async function createWindow() {
           click: () => { if (win) win.webContents.send('menu-new-scan'); }
         },
         {
-          label: 'Import .bin...',
+          label: 'Import capture...',
           accelerator: 'CmdOrCtrl+O',
           click: () => { if (win) win.webContents.send('menu-import-bin'); }
         },

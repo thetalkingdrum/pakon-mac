@@ -81,6 +81,11 @@ export const calibrationRun = (body) => post('/api/app/calibration/run', body ||
 
 export const job = (id) => get(`/api/app/job/${id}`);
 export const openCapture = (body) => post('/api/app/open', body);
+/** A Kodak TLX client planar RAW export (tools/pakon_tlx_raw.py) — a single
+ *  already-extracted frame from the real vendor client, not this project's
+ *  own .bin capture. See pakon_render.open_tlx_capture's docstring for what
+ *  is and isn't verified about reading one. */
+export const openTlxCapture = (body) => post('/api/app/open_tlx', body);
 export const setParams = (id, i, params) => post(`/api/app/roll/${id}/frame/${i}`, { params });
 export const resetFrame = (id, i) => post(`/api/app/roll/${id}/frame/${i}`, { reset: true });
 /** Copy one frame's corrections onto the whole roll. Two calls, never one.
