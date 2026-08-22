@@ -47,6 +47,7 @@ const pythonWireSample = `{
   "rotate180": true,
   "userOffsets": [1.5, -2.5, 3.5],
   "outToneLut": [11, 22, 33],
+  "want16": true,
   "provenance": {"dx": "flag"}
  }
 }`
@@ -92,6 +93,7 @@ func TestPythonWireFillsEveryField(t *testing.T) {
 	check("ccdDeskew", r.CcdDeskew, [3]int{8, 0, -8})
 	check("rotate180", r.Rotate180, true)
 	check("userOffsets", r.UserOffsets, [3]float64{1.5, -2.5, 3.5})
+	check("want16", r.Want16, true)
 	if r.Provenance["dx"] != "flag" {
 		t.Errorf("provenance did not arrive: %v", r.Provenance)
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"image"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"pakonpipeline/kcmsclut"
 
 	"golang.org/x/image/tiff"
 )
@@ -250,7 +253,9 @@ func (p *ColorProfile) ApplyMath(r, g, b float32) (float32, float32, float32) {
 	return finalR, finalG, finalB
 }
 
-func processImage(fr *frame, req *RenderRequest, eng *Engine, logf func(string, ...any), emit func(out, bypass *image.RGBA) error) error {
+// emit16 receives the 16-bit render when req.Want16 is set; it is never
+// called otherwise (a caller that does not want 16-bit output may pass nil).
+func processImage(fr *frame, req *RenderRequest, eng *Engine, logf func(string, ...any), emit func(out, bypass *image.RGBA) error, emit16 func(out16 *image.RGBA64) error) error {
 	profile := eng.Profile
 	rpd2pcs := eng.Rpd2Pcs
 	srgb := eng.Srgb
@@ -264,6 +269,10 @@ func processImage(fr *frame, req *RenderRequest, eng *Engine, logf func(string, 
 
 	outImg := image.NewRGBA(image.Rect(0, 0, width, height))
 	bypassImg := image.NewRGBA(image.Rect(0, 0, width, height))
+	var outImg16 *image.RGBA64
+	if req.Want16 {
+		outImg16 = image.NewRGBA64(image.Rect(0, 0, width, height))
+	}
 
 	// Stage taps, for "show me each stage" — additive, no effect on the
 	// render when req.TapDir is "". NewTapWriter and every method on it are
@@ -673,6 +682,10 @@ func processImage(fr *frame, req *RenderRequest, eng *Engine, logf func(string, 
 			for y := y0; y < y1; y++ {
 				outRow := outImg.Pix[y*outImg.Stride : y*outImg.Stride+width*4]
 				bypassRow := bypassImg.Pix[y*bypassImg.Stride : y*bypassImg.Stride+width*4]
+				var out16Row []byte
+				if outImg16 != nil {
+					out16Row = outImg16.Pix[y*outImg16.Stride : y*outImg16.Stride+width*8]
+				}
 				for x := 0; x < width; x++ {
 					p := shasted[y][x]
 
@@ -699,6 +712,25 @@ func processImage(fr *frame, req *RenderRequest, eng *Engine, logf func(string, 
 					outRow[o], outRow[o+1], outRow[o+2], outRow[o+3] =
 						srgbColor[0], srgbColor[1], srgbColor[2], 255
 					iccU8[y][x] = srgbColor
+
+					// out16Row is nil unless req.Want16 asked for it — see
+					// RenderRequest.Want16 and kcmsclut.EvalU16's own
+					// docstring for what this is and is not. Deliberately
+					// NOT run through IccRenderRpd12ToSrgb8's
+					// PAKON_ICC_TRILINEAR switch: that alternate evaluator is
+					// the one docs/74 §176 already found diverges further
+					// from the vendor, and 16-bit output exists to extend
+					// the vendor-anchored path's own headroom, not to swap
+					// which colour it renders.
+					if out16Row != nil {
+						srgb16 := kcmsclut.Rpd12ToSrgb16(
+							[3]int{finalR, finalG, finalB})
+						o16 := x * 8
+						binary.BigEndian.PutUint16(out16Row[o16:], srgb16[0])
+						binary.BigEndian.PutUint16(out16Row[o16+2:], srgb16[1])
+						binary.BigEndian.PutUint16(out16Row[o16+4:], srgb16[2])
+						binary.BigEndian.PutUint16(out16Row[o16+6:], 0xffff)
+					}
 					sum[0] += float64(srgbColor[0])
 					sum[1] += float64(srgbColor[1])
 					sum[2] += float64(srgbColor[2])
@@ -750,7 +782,13 @@ func processImage(fr *frame, req *RenderRequest, eng *Engine, logf func(string, 
 		return fmt.Errorf("tap writer close: %w", err)
 	}
 
-	return emit(outImg, nil)
+	if err := emit(outImg, nil); err != nil {
+		return err
+	}
+	if outImg16 != nil && emit16 != nil {
+		return emit16(outImg16)
+	}
+	return nil
 }
 
 // DefaultCoeffRelPath and defaultAnselRelPath are repo-relative, and are
@@ -1081,7 +1119,7 @@ func main() {
 		return png.Encode(outF, out)
 	}
 
-	if err := processImage(fr, req, eng, logf, emit); err != nil {
+	if err := processImage(fr, req, eng, logf, emit, nil); err != nil {
 		log.Fatalf("processImage failed: %v", err)
 	}
 }

@@ -335,7 +335,105 @@ func pakonColorRender(reqJSON *C.char, in *C.uint16_t, h, w C.int32_t,
 		return nil
 	}
 
-	if err := processImage(fr, ar.Request, eng, logf, emit); err != nil {
+	if err := processImage(fr, ar.Request, eng, logf, emit, nil); err != nil {
+		return writeErr(msg, msgLen, rcRefused, "render", "%v", err)
+	}
+	return writeOK(msg, msgLen, log.String(), eng.Resolution())
+}
+
+//export PakonColorRenderU16
+func PakonColorRenderU16(reqJSON *C.char, in *C.uint16_t, h, w C.int32_t,
+	out *C.uint16_t, msg *C.char, msgLen C.int32_t) (rc C.int32_t) {
+	defer func() {
+		if r := recover(); r != nil {
+			rc = writeErr(msg, msgLen, rcInternal, "internal",
+				"panic in PakonColorRenderU16: %v\n%s", r, debug.Stack())
+		}
+	}()
+	mu.Lock()
+	defer mu.Unlock()
+	return pakonColorRenderU16(reqJSON, in, h, w, out, msg, msgLen)
+}
+
+// pakonColorRenderU16 is pakonColorRender's 16-bit-output counterpart. It
+// runs the exact same tone/geometry/correction pipeline — RenderRequest.Want16
+// only changes what the ICC hop's LAST step does (kcmsclut.EvalU16 instead of
+// EvalU8, see its own docstring) — so every refusal, warning and provenance
+// line pakonColorRender can produce, this can too, unchanged.
+func pakonColorRenderU16(reqJSON *C.char, in *C.uint16_t, h, w C.int32_t,
+	out *C.uint16_t, msg *C.char, msgLen C.int32_t) C.int32_t {
+
+	if in == nil || out == nil {
+		return writeErr(msg, msgLen, rcBuffer, "buffer",
+			"null buffer: in=%v out=%v", in != nil, out != nil)
+	}
+	if h <= 0 || w <= 0 {
+		return writeErr(msg, msgLen, rcBuffer, "buffer",
+			"frame is %dx%d; both dimensions must be positive", int(w), int(h))
+	}
+	ar, code, why := parseRequest(reqJSON)
+	if code != rcOK {
+		return writeErr(msg, msgLen, code, kindOf(code), "%s", why)
+	}
+	// Forced, not trusted from the wire: this entry point's whole contract is
+	// "you get a 16-bit buffer back", so it does not depend on the JSON
+	// caller having remembered to set want16 — Want16 is not part of the
+	// engine selection key (engine.go keyOf), so setting it here cannot evict
+	// or misdirect the warm Engine cache.
+	ar.Request.Want16 = true
+	eng, err := engineFor(ar)
+	if err != nil {
+		return writeErr(msg, msgLen, rcLoad, "load", "%v", err)
+	}
+
+	height, width := int(h), int(w)
+	n := height * width * 3
+	src := unsafe.Slice((*uint16)(unsafe.Pointer(in)), n)
+
+	fr := &frame{h: height, w: width, px: make([][][3]int, height)}
+	for y := 0; y < height; y++ {
+		row := make([][3]int, width)
+		base := y * width * 3
+		for x := 0; x < width; x++ {
+			i := base + x*3
+			row[x] = [3]int{int(src[i]), int(src[i+1]), int(src[i+2])}
+		}
+		fr.px[y] = row
+	}
+
+	var log strings.Builder
+	logf := func(format string, a ...any) { fmt.Fprintf(&log, format, a...) }
+
+	if ar.Request.WriteBypass {
+		return writeErr(msg, msgLen, rcRequest, "request",
+			"writeBypass is not available across the dylib boundary: one image "+
+				"per frame, no intermediates. Use the pakonpipeline CLI for a "+
+				"bypass PNG.")
+	}
+
+	dst := unsafe.Slice((*uint16)(unsafe.Pointer(out)), n)
+	// The 8-bit image is still built by processImage (Want16 only adds the
+	// 16-bit one alongside it), but this entry point's contract is a 16-bit
+	// buffer only, so its own emit is a no-op — the real copy happens in
+	// emit16 below.
+	emit := func(img, bypass *image.RGBA) error { return nil }
+	emit16 := func(img16 *image.RGBA64) error {
+		b := img16.Bounds()
+		if b.Dx() != width || b.Dy() != height {
+			return fmt.Errorf("internal: rendered %dx%d for a %dx%d frame",
+				b.Dx(), b.Dy(), width, height)
+		}
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				c := img16.RGBA64At(x, y)
+				i := (y*width + x) * 3
+				dst[i], dst[i+1], dst[i+2] = c.R, c.G, c.B
+			}
+		}
+		return nil
+	}
+
+	if err := processImage(fr, ar.Request, eng, logf, emit, emit16); err != nil {
 		return writeErr(msg, msgLen, rcRefused, "render", "%v", err)
 	}
 	return writeOK(msg, msgLen, log.String(), eng.Resolution())

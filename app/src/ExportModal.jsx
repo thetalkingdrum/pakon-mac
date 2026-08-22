@@ -86,7 +86,8 @@ export default function ExportModal({ open, onClose, roll, cfg, setCfg, job, run
 
   const { format, colour, template, dest, subfolder } = cfg;
   const put = (k, v) => setCfg((c) => ({ ...c, [k]: v }));
-  const effectiveFormat = colour === 'linear' ? 'tiff' : format;
+  const tiffOnly = colour === 'linear' || colour === 'srgb16';
+  const effectiveFormat = tiffOnly ? 'tiff' : format;
 
   const toggle = (i) => {
     setSelected((s) => {
@@ -169,14 +170,14 @@ export default function ExportModal({ open, onClose, roll, cfg, setCfg, job, run
             </label>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: tiffOnly ? 4 : 12 }}>
             <div className="field" style={{ marginBottom: 0 }}>
               <span className="lbl">Format</span>
               <Seg
                 ariaLabel="Format"
                 value={effectiveFormat}
                 onChange={(v) => put('format', v)}
-                options={colour === 'linear' ? [['tiff', 'TIFF']] : FORMATS}
+                options={tiffOnly ? [['tiff', 'TIFF']] : FORMATS}
               />
             </div>
             <div className="field" style={{ marginBottom: 0 }}>
@@ -187,11 +188,21 @@ export default function ExportModal({ open, onClose, roll, cfg, setCfg, job, run
                 onChange={(v) => put('colour', v)}
                 options={[
                   ['srgb', 'sRGB · 8-bit'],
+                  ['srgb16', 'sRGB · 16-bit'],
                   ['linear', 'Linear · 16-bit'],
                 ]}
               />
             </div>
           </div>
+
+          {colour === 'srgb16' ? (
+            <p style={{ fontSize: 11.5, color: 'var(--faint)', marginBottom: 12 }}>
+              More than 256 levels per channel for grading headroom, blended between
+              the same real colour-managed values the default 8-bit export uses —
+              not an independently verified 16-bit render, and brightness/contrast/
+              saturation/sharpening are not applied (same as Linear).
+            </p>
+          ) : null}
 
           {showNaming ? (
             <div className="field" style={{ marginBottom: 14 }}>

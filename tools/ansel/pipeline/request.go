@@ -205,6 +205,16 @@ type RenderRequest struct {
 	Provenance  map[string]string // where each field came from, for the log
 	TapDir      string            // "" = no taps
 	WriteBypass bool
+
+	// Want16 asks processImage to also build a 16-bit-per-channel sRGB image
+	// (kcmsclut.Rpd12ToSrgb16) alongside the ordinary 8-bit one, for a caller
+	// that wants export headroom rather than the vendor's own 8-bit ceiling.
+	// See kcmsclut.EvalU16's docstring for exactly what "16-bit" does and does
+	// not mean here — it is a reconstruction anchored to real vendor sample
+	// points, not an independently vendor-verified transform above 8 bits.
+	// False by default and free when unset: nothing extra is computed unless
+	// a caller asks.
+	Want16 bool
 }
 
 // HasToneLut reports whether this request carries a real analyzeAutoTone curve.

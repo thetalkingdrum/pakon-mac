@@ -224,6 +224,16 @@ class ColourRequest:
     #: field's to make.
     outToneLut: tuple = ()
 
+    #: Ask the ICC hop's last step to blend into the next real vendor sample
+    #: (kcmsclut.EvalU16) instead of floor-snapping to one (kcmsclut.EvalU8),
+    #: so a 16-bit export has more than 256 levels per channel to work with.
+    #: See tools/ansel/pipeline/kcmsclut/kcmsclut.go:EvalU16's own docstring
+    #: for exactly what this is and is not: anchored to real captured vendor
+    #: bytes, exact at every real sample point, but not itself independently
+    #: vendor-verified above 8 bits. False by default; render() ignores it —
+    #: only render16() acts on it, via PakonColorRenderU16.
+    want16: bool = False
+
     provenance: dict = field(default_factory=dict)
 
     def wire(self) -> bytes:
@@ -328,6 +338,14 @@ def load() -> ctypes.CDLL:
         ctypes.c_char_p, ctypes.c_int32,    # msg buffer
     ]
     lib.PakonColorRender.restype = ctypes.c_int32
+    lib.PakonColorRenderU16.argtypes = [
+        ctypes.c_char_p,                    # request JSON
+        ctypes.POINTER(ctypes.c_uint16),    # in  (h, w, 3) u16
+        ctypes.c_int32, ctypes.c_int32,     # h, w
+        ctypes.POINTER(ctypes.c_uint16),    # out (h, w, 3) u16
+        ctypes.c_char_p, ctypes.c_int32,    # msg buffer
+    ]
+    lib.PakonColorRenderU16.restype = ctypes.c_int32
     lib.PakonColorClose.argtypes = []
     lib.PakonColorClose.restype = None
 
@@ -419,6 +437,38 @@ def render(rgb14: np.ndarray, req: ColourRequest,
         arr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
         ctypes.c_int32(h), ctypes.c_int32(w),
         out.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        buf, _MSG_LEN,
+    )
+    obj = _decode(rc, buf)
+    if log is not None and obj.get("log"):
+        log.append(obj["log"])
+    return out
+
+
+def render16(rgb14: np.ndarray, req: ColourRequest,
+             log: list | None = None) -> np.ndarray:
+    """render()'s 16-bit counterpart: ``(h, w, 3)`` sRGB uint16, not uint8.
+
+    Runs the identical tone/geometry/correction pipeline as ``render()`` —
+    only the ICC hop's last step changes (``kcmsclut.EvalU16`` instead of
+    ``EvalU8``; see its own docstring). ``req.want16`` is not read on this
+    side — ``PakonColorRenderU16`` forces it on the Go side, so this always
+    gets the 16-bit buffer regardless of what the request already carried.
+    """
+    lib = load()
+    arr = np.ascontiguousarray(rgb14, dtype=np.uint16)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise GoColourError(-4, "buffer",
+                            "render16 expects (h, w, 3), got %r" % (arr.shape,))
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    out = np.empty((h, w, 3), dtype=np.uint16)
+    buf = ctypes.create_string_buffer(_MSG_LEN)
+
+    rc = lib.PakonColorRenderU16(
+        req.wire(),
+        arr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
+        ctypes.c_int32(h), ctypes.c_int32(w),
+        out.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
         buf, _MSG_LEN,
     )
     obj = _decode(rc, buf)
