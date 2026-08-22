@@ -158,6 +158,26 @@ def capture_dirs() -> list[Path]:
     return out
 
 
+def render_env_fingerprint() -> str:
+    """Every ``PAKON_*`` env var that can change a rendered frame's pixels,
+    folded into one short string.
+
+    A rendered frame's bytes depend on this process's environment
+    (`PAKON_COLOUR_ENGINE`, `PAKON_REAL_AUTOTONE`, `PAKON_VENDOR_INVERT`, and
+    a growing list of other research flags in pakon_render.py/pakon_decode.py)
+    as well as on the roll/frame/params the URL already encodes. A frame
+    image cache keyed on the URL alone is wrong the moment two backend
+    launches with different flags render the same roll id — which happens
+    routinely, since a roll resumes with the same id across restarts. Hashing
+    the whole `PAKON_*` environment, rather than naming each flag here, means
+    a new flag added later is covered automatically instead of silently
+    reintroducing this staleness.
+    """
+    relevant = sorted(f"{k}={v}" for k, v in os.environ.items()
+                      if k.startswith("PAKON_"))
+    return hashlib.sha1("|".join(relevant).encode()).hexdigest()[:12]
+
+
 def capture_key(path: str | Path) -> str:
     """Stable identity for a capture: path + size + mtime. Sidecars hang off
     this, so reopening the same .bin restores every adjustment."""
@@ -2027,13 +2047,22 @@ def _json(h, obj, code=200):
     h.wfile.write(body)
 
 
-def _bin(h, body: bytes, ctype: str, code=200, cache=False):
+def _bin(h, body: bytes, ctype: str, code=200, cache=False, etag=None):
     h.send_response(code)
     h.send_header("Content-Type", ctype)
     h.send_header("Content-Length", str(len(body)))
     h.send_header("Access-Control-Allow-Origin", "*")
     if cache:
-        h.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        if etag:
+            # NOT "immutable" -- the same URL (roll id resumes across
+            # restarts) can legitimately render different bytes once the
+            # backend's PAKON_* environment changes. Always revalidate; the
+            # ETag (render_env_fingerprint(), folded into the cache key)
+            # makes that a cheap 304 whenever nothing actually changed.
+            h.send_header("Cache-Control", "no-cache")
+            h.send_header("ETag", etag)
+        else:
+            h.send_header("Cache-Control", "public, max-age=31536000, immutable")
     h.end_headers()
     h.wfile.write(body)
 
@@ -2207,7 +2236,18 @@ class H(_BASE):                                     # type: ignore[misc,valid-ty
             return _json(self, {"error": f"frame {index} of "
                                          f"{len(roll.frames)}"}, 404)
         f = roll.frames[index]
-        key = f"{roll.id}:{index}:{scale}:{max_edge}:{_pv(f.params)}"
+        key = (f"{roll.id}:{index}:{scale}:{max_edge}:{_pv(f.params)}:"
+              f"{render_env_fingerprint()}")
+        etag = '"' + hashlib.sha1(key.encode()).hexdigest()[:16] + '"'
+        if self.headers.get("If-None-Match") == etag:
+            # The client already has exactly this roll/frame/params rendered
+            # under exactly this backend's PAKON_* environment -- nothing to
+            # send, and nothing to render.
+            self.send_response(304)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
         hit = S.cache_get(key)
         if hit is None:
             t0 = time.perf_counter()
@@ -2237,7 +2277,7 @@ class H(_BASE):                                     # type: ignore[misc,valid-ty
             hit = pr.encode(img, "JPEG", quality=90)
             S.cache_put(key, hit)
             self._last_ms = (time.perf_counter() - t0) * 1000.0
-        return _bin(self, hit, "image/jpeg", cache=True)
+        return _bin(self, hit, "image/jpeg", cache=True, etag=etag)
 
     # --------------------------------------------------------------- POST
     def do_POST(self):                              # noqa: N802
