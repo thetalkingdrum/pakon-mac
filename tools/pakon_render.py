@@ -597,6 +597,15 @@ class Roll:
     #: a measured one before this existed — Review said "Typed, not read" even
     #: when the value came off the board.
     dx_source: str = ""
+    #: "bin" (default) — a pakon-mac EP 0x86 strip capture, calibrated lazily
+    #: per-slice in ``attach()`` from ``calibration/*.npy``. "tlx_raw" — a
+    #: Kodak TLX client planar RAW export (``tools/pakon_tlx_raw.py``):
+    #: already a single frame, and assumed already dark/gain-corrected and
+    #: CCD-registered by the vendor client, so ``attach()`` skips this
+    #: project's own calibration rather than applying a second, different
+    #: one on top. See ``pakon_tlx_raw``'s module docstring for exactly which
+    #: assumptions that is and how verified (not, yet) they are.
+    source: str = "bin"
     #: Things the owner needs to be told about this roll that are not fatal:
     #: an exposure triad the committed tables are not valid for, a frame pitch
     #: that disagrees with the recorded speed, a DX that did not resolve.
@@ -650,7 +659,7 @@ class Roll:
                    "data_dir", "ansel_root", "model", "transport_scale",
                    "transport_source", "transport_residual_pct",
                    "dx_source", "warnings", "framing", "ones_threshold",
-                   "gain_scale")
+                   "gain_scale", "source")
 
     def to_json(self) -> dict:
         d = {k: getattr(self, k) for k in self.JSON_FIELDS}
@@ -673,9 +682,17 @@ class Roll:
             if self._rgb is None:
                 self._rgb = np.load(self.cache_path, mmap_mode="r")
             if self._dark is None:
-                self._dark, self._gain, _ = dec.load_unit_calibration()
-                if self.gain_scale != 1.0:
-                    self._gain = self._gain * self.gain_scale
+                if self.source == "tlx_raw":
+                    # Already dark/gain-corrected by the vendor TLX client
+                    # (assumed, see pakon_tlx_raw's module docstring) —
+                    # identity here, not this port's own calibration/*.npy.
+                    shape = (dec.PIXELS_PER_LINE, dec.CHANNELS)
+                    self._dark = np.zeros(shape, dtype=np.float64)
+                    self._gain = np.ones(shape, dtype=np.float64)
+                else:
+                    self._dark, self._gain, _ = dec.load_unit_calibration()
+                    if self.gain_scale != 1.0:
+                        self._gain = self._gain * self.gain_scale
         return self._rgb
 
     def slice14(self, a: int, b: int, step: int = 1) -> np.ndarray:
@@ -764,6 +781,174 @@ def probe_capture(path: str | Path) -> dict:
     }
 
 
+def _resolve_dx_stock(roll: "Roll", dx: str | None,
+                      film_path: str | None) -> None:
+    """Shared by ``open_capture`` and ``open_tlx_capture``.
+
+    A DX THAT DOES NOT RESOLVE IS AN ERROR, NOT A NULL. This used to be a
+    bare `except Exception: roll.stock = None`, and the client dropped
+    `film_path` whenever a DX was typed — so a mistyped code discarded BOTH
+    the stock and the film path, `has_film()` was still satisfied by the
+    unresolvable string, and the render walked straight through the refusal
+    that exists to stop exactly this and landed on `ansel-sba-CN-default`.
+    The owner's film was rendered as a stock nobody chose, silently.
+    """
+    if not dx:
+        return
+    try:
+        p1, p2 = film.parse_dx(dx)
+        s = film.lookup(p1, p2)
+        roll.stock = {
+            "name": s.name, "manufacturer": s.manufacturer,
+            "path": s.path, "iso": s.iso,
+            "dx_part1": s.dx_part1, "dx_part2": s.dx_part2,
+            "sba_override": s.sba_override,
+        }
+    except Exception as e:                                  # noqa: BLE001
+        roll.stock = None
+        if not film_path:
+            raise ValueError(
+                f"DX {dx!r} does not resolve to a film stock ({e}), and no "
+                f"film path was chosen either. Rendering it anyway would "
+                f"mean falling back to a colour-negative default nobody "
+                f"selected. Correct the DX, or clear it and choose a film "
+                f"path.") from e
+        # A film path WAS chosen, so there is something real to render
+        # with. Say so loudly rather than silently pretending the DX was
+        # never entered.
+        roll.dx_source = "unresolved"
+        roll.warnings.append(
+            f"DX {dx!r} does not resolve to a known film stock ({e}); "
+            f"this roll is being rendered as {film_path} instead. The "
+            f"stock-specific curves are not being used.")
+
+
+def open_tlx_capture(path: str | Path, workspace: str | Path, roll_id: str,
+                     name: str | None = None, dx: str | None = None,
+                     progress=lambda *a: None,
+                     data_dir: str | None = None,
+                     ansel_root: str | None = None,
+                     film_path: str | None = None,
+                     sba_key: str | None = None,
+                     sba_default: bool = False,
+                     dx_source: str = "",
+                     film_base: tuple[float, float, float] | None = None,
+                     ) -> Roll:
+    """A Kodak TLX client planar RAW export (``pakon_tlx_raw.py``) -> a
+    single-frame Roll, the same shape ``open_capture`` builds from a .bin
+    strip -- so the rest of the app (frame list, param editing, export) works
+    on it unmodified.
+
+    ``film_base`` overrides the FindDmin measurement below with an explicit
+    R,G,B triple. Use it when the frame is fully photographic content with no
+    genuine clear-film margin — a tightly-cropped vendor export can contain a
+    bright real subject (sunlit glass, snow, sky) that FindDmin cannot tell
+    apart from clear film, and will anchor the whole inversion on the wrong
+    thing. A known-good base from another frame of the same roll/stock (or a
+    real vendor measurement) is more trustworthy than a guess made from this
+    frame's own content.
+
+    Unlike a .bin, this is already one extracted, geometry-corrected frame
+    from the vendor's own client: there is no EP 0x86 sync stream to segment
+    and no leader/gate to classify, so this skips straight to one frame span
+    covering the whole image. ``Roll.source = "tlx_raw"`` records that this
+    is not this project's own capture, and makes ``attach()`` skip this
+    port's own per-pixel calibration (see that field's docstring, and
+    ``pakon_tlx_raw``'s module docstring, for exactly which assumptions this
+    rests on — inferred from the pakon-tlx-macos README, not verified
+    against a matched vendor reference).
+    """
+    import pakon_tlx_raw as tlx
+
+    src = Path(path).resolve()
+    ws = Path(workspace) / roll_id
+    ws.mkdir(parents=True, exist_ok=True)
+
+    roll = Roll(
+        id=roll_id,
+        name=name or src.stem,
+        capture=str(src),
+        workspace=str(ws),
+        dx=dx,
+        film_path=film_path,
+        sba_key=sba_key,
+        sba_default=sba_default,
+        created=time.time(),
+        data_dir=data_dir or dec.DEFAULT_DATA_DIR,
+        ansel_root=ansel_root or dec.DEFAULT_ANSEL_ROOT,
+        dx_source=(dx_source or ("typed" if dx else "")),
+        source="tlx_raw",
+        transport_scale=1.0,  # the vendor client already resampled this axis
+        transport_source="TLX client's own frame extraction (unverified)",
+    )
+    roll.warnings.append(
+        "opened from a Kodak TLX client RAW export, not a pakon-mac "
+        "capture (tools/pakon_tlx_raw.py). Per-pixel calibration and CCD "
+        "deskew are assumed already applied by the vendor client, and "
+        "orientation is assumed to need the same 180-degree lens rotation "
+        "this project's own strip decoder applies — none of that is "
+        "verified against a matched reference."
+    )
+
+    _resolve_dx_stock(roll, dx, film_path)
+
+    progress("reading", 0.05, f"reading {src.name}")
+    rgb14 = tlx.load_tlx_planar_raw(src)
+    n = int(rgb14.shape[0])
+    roll.lines = n
+    roll.sync = {
+        "markers": None, "lines": n, "losses": 0, "pct_clean": None,
+        "bytes": int(src.stat().st_size), "truncated": False,
+        "note": "no EP 0x86 sync stream — this is a vendor per-frame export",
+    }
+
+    progress("caching", 0.6, "writing render cache")
+    np.save(roll.cache_path, rgb14)
+
+    roll.frames = [Frame(index=0, a=0, b=n, confidence="good",
+                         phase="tlx-import")]
+    roll.framing = {
+        "note": "single frame from a vendor TLX export; the framing "
+                "cascade did not run — there is nothing to detect",
+    }
+
+    if film_base is not None:
+        roll.film_base = [float(v) for v in film_base]
+        roll.warnings.append(
+            f"film base {roll.film_base} was typed in at open time, not "
+            f"measured — FindDmin did not run on this frame."
+        )
+    # The Go colour engine (this app's default) has no per-frame FindDmin
+    # fallback the way the Python engine's scene_rpd12 does — it requires
+    # roll.film_base populated up front, the same way open_capture() fills
+    # it in for a .bin (FindDmin over the roll's own film area). There is
+    # only one frame here, so "the roll's film area" and "this frame" are
+    # the same population.
+    elif roll.model == "f135" and roll.has_film():
+        progress("film-base", 0.8, "measuring film base (FindDmin)")
+        fclass = roll.film_class()
+        r16 = _rpd16(rgb14, roll.data_dir, np.zeros(3), model=roll.model,
+                    film_class=fclass)
+        lin12 = ansel.rpd16_to_rpd12(r16, pc.RPD_MAX_BY_MODEL[roll.model])
+        base, win = dec.film_base_codes(lin12, capture=str(src))
+        roll.film_base = [float(v) for v in base]
+        if any(v <= 0 for v in roll.film_base):
+            # Same sentinel/refusal condition open_capture() warns about —
+            # see its own comment for what 0 means and why it warns rather
+            # than refuses here.
+            pct = win.get("clip_pct", [0.0, 0.0, 0.0])
+            roll.warnings.append(
+                f"FindDmin found no film base {[int(v) for v in roll.film_base]} "
+                f"over columns {win.get('col0')}.., {win.get('lines_kept')} of "
+                f"{win.get('lines_total')} lines — {pct[0]:.3f}% / {pct[1]:.3f}% "
+                f"/ {pct[2]:.3f}% of pixels still at the 4095 ceiling. "
+                f"Colour will refuse to render until this resolves.")
+        del r16, lin12
+
+    progress("done", 1.0, "ready")
+    return roll
+
+
 def open_capture(path: str | Path, workspace: str | Path, roll_id: str,
                  name: str | None = None, dx: str | None = None,
                  progress=lambda *a: None,
@@ -808,41 +993,7 @@ def open_capture(path: str | Path, workspace: str | Path, roll_id: str,
     # Resolve the stock first: it decides roll.film_class(), and stage 2 runs
     # below in pass A. Looking it up after the colour work is done is how the
     # film path stops reaching the matrix dispatch.
-    #
-    # A DX THAT DOES NOT RESOLVE IS AN ERROR, NOT A NULL. This used to be a
-    # bare `except Exception: roll.stock = None`, and the client dropped
-    # `film_path` whenever a DX was typed — so a mistyped code discarded BOTH
-    # the stock and the film path, `has_film()` was still satisfied by the
-    # unresolvable string, and the render walked straight through the refusal
-    # that exists to stop exactly this and landed on `ansel-sba-CN-default`.
-    # The owner's film was rendered as a stock nobody chose, silently.
-    if dx:
-        try:
-            p1, p2 = film.parse_dx(dx)
-            s = film.lookup(p1, p2)
-            roll.stock = {
-                "name": s.name, "manufacturer": s.manufacturer,
-                "path": s.path, "iso": s.iso,
-                "dx_part1": s.dx_part1, "dx_part2": s.dx_part2,
-                "sba_override": s.sba_override,
-            }
-        except Exception as e:                              # noqa: BLE001
-            roll.stock = None
-            if not film_path:
-                raise ValueError(
-                    f"DX {dx!r} does not resolve to a film stock ({e}), and no "
-                    f"film path was chosen either. Rendering it anyway would "
-                    f"mean falling back to a colour-negative default nobody "
-                    f"selected. Correct the DX, or clear it and choose a film "
-                    f"path.") from e
-            # A film path WAS chosen, so there is something real to render
-            # with. Say so loudly rather than silently pretending the DX was
-            # never entered.
-            roll.dx_source = "unresolved"
-            roll.warnings.append(
-                f"DX {dx!r} does not resolve to a known film stock ({e}); "
-                f"this roll is being rendered as {film_path} instead. The "
-                f"stock-specific curves are not being used.")
+    _resolve_dx_stock(roll, dx, film_path)
 
     # WAS THIS CAPTURE EXPOSED THE WAY THE COMMITTED TABLES ASSUME?
     # `dec.load_unit_calibration` checks the arrays' shape and nothing else,
