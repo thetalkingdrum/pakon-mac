@@ -839,6 +839,26 @@ def job_open(jid: str, body: dict) -> None:
                   trace=traceback.format_exc()[-2000:])
 
 
+def _parse_film_base_spec(spec: str | None) -> tuple[float, float, float] | None:
+    """``"3034,1918,2087"`` -> ``(3034.0, 1918.0, 2087.0)``, or ``None`` for
+    blank -- shared by every job that accepts a typed film-base override, so
+    the three-numbers rule and its error message can't drift between them.
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        return None
+    try:
+        parts = [float(v.strip()) for v in spec.split(",")]
+    except ValueError:
+        raise ValueError(
+            f"film_base {spec!r} is not three comma-separated numbers (R,G,B)")
+    if len(parts) != 3:
+        raise ValueError(
+            f"film_base needs exactly 3 values (R,G,B), got {len(parts)}: "
+            f"{spec!r}")
+    return tuple(parts)
+
+
 def job_open_tlx(jid: str, body: dict) -> None:
     """Open a Kodak TLX client planar RAW export (tools/pakon_tlx_raw.py).
 
@@ -868,23 +888,59 @@ def job_open_tlx(jid: str, body: dict) -> None:
         film_path = (body.get("film_path") or "").strip() or None
         refuse_film_choice(film_path, dx_spec)
 
-        film_base = None
-        fb_spec = (body.get("film_base") or "").strip()
-        if fb_spec:
-            try:
-                parts = [float(v.strip()) for v in fb_spec.split(",")]
-            except ValueError:
-                raise ValueError(
-                    f"film_base {fb_spec!r} is not three comma-separated "
-                    f"numbers (R,G,B)")
-            if len(parts) != 3:
-                raise ValueError(
-                    f"film_base needs exactly 3 values (R,G,B), got "
-                    f"{len(parts)}: {fb_spec!r}")
-            film_base = tuple(parts)
+        film_base = _parse_film_base_spec(body.get("film_base"))
 
         roll = pr.open_tlx_capture(
             src, WORKSPACE, roll_id,
+            name=body.get("name"),
+            dx=dx_spec,
+            dx_source=("typed" if dx_spec else ""),
+            film_path=film_path,
+            sba_key=body.get("sba_key") or None,
+            sba_default=bool(body.get("sba_default")),
+            film_base=film_base,
+            progress=prog,
+        )
+        meta_path = Path(roll.workspace) / "roll.json"
+        meta_path.write_text(json.dumps(roll.to_json(), indent=1))
+        save_sidecar(roll)
+        with S.lock:
+            S.rolls[roll.id] = roll
+        S._roll_mtime[roll.id] = meta_path.stat().st_mtime
+        S.job_set(jid, status="done", progress=1.0, phase="done",
+                  message=f"{len(roll.frames)} frames", roll=roll.id)
+    except Exception as e:                                  # noqa: BLE001
+        S.job_set(jid, status="error", error=f"{e}",
+                  trace=traceback.format_exc()[-2000:])
+
+
+def job_open_tlx_roll(jid: str, body: dict) -> None:
+    """Open several Kodak TLX client planar RAW exports as one multi-frame
+    roll (``pr.open_tlx_capture_multi``). Mirrors ``job_open_tlx`` in every
+    way except the plural: ``paths`` (a list) instead of ``path``.
+    """
+    try:
+        paths = body.get("paths")
+        if not paths or not isinstance(paths, list):
+            raise ValueError("no capture paths")
+        srcs = [Path(p) for p in paths]
+        missing = [str(p) for p in srcs if not p.is_file()]
+        if missing:
+            raise FileNotFoundError(f"file(s) not found: {', '.join(missing)}")
+
+        roll_id = uuid.uuid4().hex[:8]
+
+        def prog(phase, frac, msg):
+            S.job_set(jid, phase=phase, progress=float(frac), message=msg)
+
+        dx_spec = (body.get("dx") or "").strip() or None
+        film_path = (body.get("film_path") or "").strip() or None
+        refuse_film_choice(film_path, dx_spec)
+
+        film_base = _parse_film_base_spec(body.get("film_base"))
+
+        roll = pr.open_tlx_capture_multi(
+            srcs, WORKSPACE, roll_id,
             name=body.get("name"),
             dx=dx_spec,
             dx_source=("typed" if dx_spec else ""),
@@ -2330,6 +2386,12 @@ class H(_BASE):                                     # type: ignore[misc,valid-ty
         if route == "open_tlx":
             jid = S.job_new("open_tlx")
             threading.Thread(target=job_open_tlx, args=(jid, body),
+                             daemon=True).start()
+            return _json(self, {"id": jid})
+
+        if route == "open_tlx_roll":
+            jid = S.job_new("open_tlx_roll")
+            threading.Thread(target=job_open_tlx_roll, args=(jid, body),
                              daemon=True).start()
             return _json(self, {"id": jid})
 

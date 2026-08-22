@@ -1011,6 +1011,139 @@ def open_tlx_capture(path: str | Path, workspace: str | Path, roll_id: str,
     return roll
 
 
+def open_tlx_capture_multi(paths: list[str | Path], workspace: str | Path,
+                           roll_id: str, name: str | None = None,
+                           dx: str | None = None,
+                           progress=lambda *a: None,
+                           data_dir: str | None = None,
+                           ansel_root: str | None = None,
+                           film_path: str | None = None,
+                           sba_key: str | None = None,
+                           sba_default: bool = False,
+                           dx_source: str = "",
+                           film_base: tuple[float, float, float] | None = None,
+                           ) -> Roll:
+    """Several Kodak TLX client planar RAW exports -> one multi-frame Roll.
+
+    Each file is already one whole, already-cropped frame (see
+    ``open_tlx_capture``'s docstring), so there is nothing to segment within
+    a file — but nothing stitches several of them into one roll either, the
+    way a real .bin strip already holds many frames back to back. This
+    concatenates them along the line axis, exactly that way: frame *i* gets
+    the span ``[a, b)`` its file occupies in the combined cache. Every
+    downstream reader — frame list, param editing, apply-to-roll, export —
+    already works on spans into one cached array, so nothing there needs to
+    know these frames came from separate files at all.
+
+    ``film_base`` overrides FindDmin the same way ``open_tlx_capture`` does.
+    When it is None, FindDmin runs over the WHOLE concatenated roll —
+    ``dec.film_base_codes``'s roll-wide walk, the same one ``open_capture``
+    already uses for a .bin — instead of one frame's own content. That is the
+    real advantage of a multi-frame import over repeated single-frame opens:
+    a roll with even one genuinely blank/leader frame among its exports
+    gives FindDmin real clear-film population to find, rather than risking
+    the single-frame fallback's failure mode of anchoring on a bright
+    photographic subject (docs/77 §3).
+    """
+    import pakon_tlx_raw as tlx
+
+    srcs = [Path(p).resolve() for p in paths]
+    if not srcs:
+        raise ValueError("no TLX .raw files given")
+    ws = Path(workspace) / roll_id
+    ws.mkdir(parents=True, exist_ok=True)
+
+    roll = Roll(
+        id=roll_id,
+        name=name or srcs[0].stem,
+        capture="; ".join(str(s) for s in srcs),
+        workspace=str(ws),
+        dx=dx,
+        film_path=film_path,
+        sba_key=sba_key,
+        sba_default=sba_default,
+        created=time.time(),
+        data_dir=data_dir or dec.DEFAULT_DATA_DIR,
+        ansel_root=ansel_root or dec.DEFAULT_ANSEL_ROOT,
+        dx_source=(dx_source or ("typed" if dx else "")),
+        source="tlx_raw",
+        transport_scale=1.0,  # the vendor client already resampled this axis
+        transport_source="TLX client's own frame extraction (unverified)",
+    )
+    roll.warnings.append(
+        f"opened from {len(srcs)} Kodak TLX client RAW exports, not a "
+        f"pakon-mac capture (tools/pakon_tlx_raw.py). Per-pixel calibration "
+        f"and CCD deskew are assumed already applied by the vendor client, "
+        f"and orientation is assumed to need the same 180-degree lens "
+        f"rotation this project's own strip decoder applies — none of that "
+        f"is verified against a matched reference."
+    )
+
+    _resolve_dx_stock(roll, dx, film_path)
+
+    chunks: list[np.ndarray] = []
+    frames: list[Frame] = []
+    a = 0
+    for i, src in enumerate(srcs):
+        progress("reading", 0.05 + 0.55 * i / len(srcs),
+                 f"reading {src.name} ({i + 1} of {len(srcs)})")
+        try:
+            rgb14 = tlx.load_tlx_planar_raw(src)
+        except SystemExit as e:
+            # load_tlx_planar_raw doubles as a CLI entry point and raises
+            # SystemExit on a bad file — a plain Exception is what the job
+            # runner around this actually catches, so a mismatched file in
+            # the middle of a batch has to become one, or it silently kills
+            # the background thread instead of reporting which file failed.
+            raise ValueError(str(e)) from e
+        n = int(rgb14.shape[0])
+        chunks.append(rgb14)
+        frames.append(Frame(index=i, a=a, b=a + n, confidence="good",
+                            phase="tlx-import"))
+        a += n
+
+    rgb14_all = np.concatenate(chunks, axis=0)
+    del chunks
+    roll.lines = a
+    roll.frames = frames
+    roll.sync = {
+        "markers": None, "lines": a, "losses": 0, "pct_clean": None,
+        "bytes": sum(int(s.stat().st_size) for s in srcs), "truncated": False,
+        "note": f"no EP 0x86 sync stream — {len(srcs)} vendor per-frame "
+                f"exports concatenated",
+    }
+    roll.framing = {
+        "note": f"{len(srcs)} frames from vendor TLX exports; the framing "
+                f"cascade did not run — there is nothing to detect, each "
+                f"file is already one whole frame",
+    }
+
+    progress("caching", 0.65, "writing render cache")
+    np.save(roll.cache_path, rgb14_all)
+
+    if film_base is not None:
+        roll.film_base = [float(v) for v in film_base]
+        roll.warnings.append(
+            f"film base {roll.film_base} was typed in at open time, not "
+            f"measured — FindDmin did not run on this roll."
+        )
+    elif roll.model == "f135" and roll.has_film():
+        progress("film-base", 0.85,
+                 "measuring film base (FindDmin over the whole roll)")
+        fclass = roll.film_class()
+        base, win, warning = _measure_film_base_from_tlx(
+            rgb14_all, roll.data_dir, roll.model, fclass,
+            f"{len(srcs)} TLX exports")
+        roll.film_base = base
+        if warning:
+            roll.warnings.append(
+                f"{warning} Colour will refuse to render until this "
+                f"resolves.")
+
+    progress("done", 1.0, "ready")
+    return roll
+
+
 def open_capture(path: str | Path, workspace: str | Path, roll_id: str,
                  name: str | None = None, dx: str | None = None,
                  progress=lambda *a: None,

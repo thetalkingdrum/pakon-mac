@@ -21,7 +21,7 @@ import FrameEditor from './FrameEditor';
 import ScanModal from './ScanModal';
 import ExportModal from './ExportModal';
 import Boundaries from './Boundaries';
-import { OpenDialog, CleanupDialog } from './Dialogs';
+import { OpenDialog, ImportTlxRollDialog, CleanupDialog } from './Dialogs';
 import CalibrationBanner, { useCalibrationSetup } from './CalibrationSetup';
 import * as api from './api';
 
@@ -40,6 +40,7 @@ export default function App() {
 
   const [scanModalOpen, setScanModalOpen] = useState(false);
   const [openDlgOpen, setOpenDlgOpen] = useState(false);
+  const [importRollOpen, setImportRollOpen] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [boundsOpen, setBoundsOpen] = useState(false);
   const [boundsBusy, setBoundsBusy] = useState(false);
@@ -74,10 +75,29 @@ export default function App() {
     const clean2 = window.pakon.onMenuImportBin && window.pakon.onMenuImportBin(() => {
       setOpenDlgOpen(true);
     });
+    const clean3 = window.pakon.onMenuImportTlxRoll && window.pakon.onMenuImportTlxRoll(() => {
+      setImportRollOpen(true);
+    });
     return () => {
       if (clean1) clean1();
       if (clean2) clean2();
+      if (clean3) clean3();
     };
+  }, []);
+
+  // Shared by OpenDialog and ImportTlxRollDialog: both hand back a freshly
+  // opened roll's id the same way (a job whose result names roll.id), and
+  // switching to it, refreshing the roll list and re-bootstrapping is
+  // identical either way.
+  const handleRollOpened = useCallback(async (id) => {
+    const rs = await api.rolls();
+    setRolls(rs);
+    const opened_ = rs.find((r) => r.id === id) || rs[0] || null;
+    setRoll(opened_);
+    setSel(0);
+    setActiveTab(opened_ ? opened_.id : null);
+    setView('contact');
+    api.bootstrap().then(setBoot).catch(() => {});
   }, []);
 
   const selectTab = useCallback(
@@ -420,7 +440,11 @@ export default function App() {
             <FrameEditor roll={roll} setRoll={updateRoll} sel={sel} setSel={setSel} />
           )
         ) : (
-          <Empty onScan={() => setScanModalOpen(true)} onOpen={() => setOpenDlgOpen(true)} />
+          <Empty
+            onScan={() => setScanModalOpen(true)}
+            onOpen={() => setOpenDlgOpen(true)}
+            onImportRoll={() => setImportRollOpen(true)}
+          />
         )}
       </div>
 
@@ -464,16 +488,13 @@ export default function App() {
         open={openDlgOpen}
         onClose={() => setOpenDlgOpen(false)}
         captures={boot?.captures}
-        onOpened={async (id) => {
-          const rs = await api.rolls();
-          setRolls(rs);
-          const opened_ = rs.find((r) => r.id === id) || rs[0] || null;
-          setRoll(opened_);
-          setSel(0);
-          setActiveTab(opened_ ? opened_.id : null);
-          setView('contact');
-          api.bootstrap().then(setBoot).catch(() => {});
-        }}
+        onOpened={handleRollOpened}
+      />
+
+      <ImportTlxRollDialog
+        open={importRollOpen}
+        onClose={() => setImportRollOpen(false)}
+        onOpened={handleRollOpened}
       />
 
       {cleanup ? (

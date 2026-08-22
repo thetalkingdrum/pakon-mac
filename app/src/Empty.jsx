@@ -4,7 +4,7 @@ import React from 'react';
 import { Btn } from './components';
 import logo from './icons/pakon_frosty_transparent_final.png';
 
-export default function Empty({ onScan, onOpen }) {
+export default function Empty({ onScan, onOpen, onImportRoll }) {
   return (
     <div className="stage" style={{ flexDirection: 'column', gap: 18 }}>
       <div className="empty-card">
@@ -21,6 +21,9 @@ export default function Empty({ onScan, onOpen }) {
         </Btn>
         <Btn variant="flat" onClick={onOpen}>
           Open existing capture…
+        </Btn>
+        <Btn variant="flat" onClick={onImportRoll}>
+          Import TLX roll…
         </Btn>
       </div>
     </div>

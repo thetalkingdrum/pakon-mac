@@ -86,6 +86,9 @@ export const openCapture = (body) => post('/api/app/open', body);
  *  own .bin capture. See pakon_render.open_tlx_capture's docstring for what
  *  is and isn't verified about reading one. */
 export const openTlxCapture = (body) => post('/api/app/open_tlx', body);
+/** Several TLX exports, one frame each, opened as one multi-frame roll
+ *  (tools/pakon_render.open_tlx_capture_multi). ``paths`` is an array. */
+export const openTlxRoll = (body) => post('/api/app/open_tlx_roll', body);
 /** FindDmin on a TLX raw export, standalone — no roll opened. For measuring
  *  film base from a clear-film frame and applying that reading to a
  *  different frame's film-base override, instead of trusting FindDmin on a

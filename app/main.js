@@ -178,6 +178,30 @@ ipcMain.handle('open-capture', async () => {
   return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
 });
 
+ipcMain.handle('open-tlx-roll-files', async () => {
+  // Several TLX exports at once, for the "Import TLX roll…" dialog — same
+  // captures-dir default as open-capture, but multiSelections and .raw only:
+  // a multi-frame roll only ever comes from the vendor client's own export,
+  // never a .bin.
+  let defaultPath = null;
+  try {
+    const p = await api('/api/app/paths', { timeout: 3000 });
+    defaultPath = p.captures || p.legacy_captures || null;
+  } catch {
+    /* fall through to the OS default */
+  }
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Import TLX roll — select every frame’s export',
+    ...(defaultPath ? { defaultPath } : {}),
+    filters: [
+      { name: 'Kodak TLX client RAW', extensions: ['raw'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+    properties: ['openFile', 'multiSelections'],
+  });
+  return r.canceled ? [] : r.filePaths;
+});
+
 ipcMain.handle('choose-folder', async (_e, current) => {
   const r = await dialog.showOpenDialog(win, {
     title: 'Export destination',
@@ -225,6 +249,10 @@ async function createWindow() {
           label: 'Import capture...',
           accelerator: 'CmdOrCtrl+O',
           click: () => { if (win) win.webContents.send('menu-import-bin'); }
+        },
+        {
+          label: 'Import TLX roll...',
+          click: () => { if (win) win.webContents.send('menu-import-tlx-roll'); }
         },
         { type: 'separator' },
         process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' }
