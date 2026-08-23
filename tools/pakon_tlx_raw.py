@@ -145,7 +145,15 @@ def load_tlx_planar_raw(
     arr = np.frombuffer(body, dtype="<u2")
     planes = arr.reshape(nch, h, w)  # each plane: (height, width) row-major
     rgb = np.stack([planes[0], planes[1], planes[2]], axis=-1)  # (h, w, 3)
-    rgb14 = np.transpose(rgb, (1, 0, 2))  # -> (w, h, 3) == (lines, px, 3)
+    # A plain transpose is a diagonal reflection (mirror), not a rotation --
+    # unlike every rot90 this project's own strip decoder uses, which can
+    # never produce one. Confirmed by legible text: rendering with the
+    # transpose alone reads tent signage backwards ("XLMOTO" mirrored);
+    # reversing the scan-line axis first removes the mirror and reproduces
+    # the same upright, correctly-readable frame this project's rot90-based
+    # orientation fix (pakon_decode.ROTATE_180_FOR_LENS, pakon_render's
+    # _display_orient) already assumes.
+    rgb14 = np.transpose(rgb[:, ::-1], (1, 0, 2))  # -> (w, h, 3) == (lines, px, 3)
     for c, name in enumerate("RGB"):
         ch = rgb14[:, :, c]
         print(f"  {name}: min={ch.min()} max={ch.max()} mean={ch.mean():.1f}")
