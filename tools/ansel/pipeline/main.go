@@ -722,8 +722,19 @@ func processImage(fr *frame, req *RenderRequest, eng *Engine, logf func(string, 
 					// from the vendor, and 16-bit output exists to extend
 					// the vendor-anchored path's own headroom, not to swap
 					// which colour it renders.
+					//
+					// Rpd12ToSrgb16Fine, not Rpd12ToSrgb16: docs/79 traced a
+					// real banding defect to Rpd12ToU8's round-to-8-bit step
+					// running BEFORE the CLUT, confirmed on this exact
+					// function with real frame data (1503/1923/2451 distinct
+					// output codes on a real photograph -- a hard comb, not
+					// a continuum). Rpd12ToSrgb16Fine skips that rounding;
+					// same CLUT, same otab blend, ~20-26x more distinct
+					// codes measured, visually identical, no bit-exactness
+					// claim lost (16-bit was already disclosed as not
+					// vendor-verified above 8 bits).
 					if out16Row != nil {
-						srgb16 := kcmsclut.Rpd12ToSrgb16(
+						srgb16 := kcmsclut.Rpd12ToSrgb16Fine(
 							[3]int{finalR, finalG, finalB})
 						o16 := x * 8
 						binary.BigEndian.PutUint16(out16Row[o16:], srgb16[0])

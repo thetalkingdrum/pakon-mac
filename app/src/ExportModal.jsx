@@ -199,10 +199,11 @@ export default function ExportModal({ open, onClose, roll, cfg, setCfg, job, run
 
           {colour === 'srgb16' ? (
             <p style={{ fontSize: 11.5, color: 'var(--faint)', marginBottom: 12 }}>
-              More than 256 levels per channel for grading headroom, blended between
-              the same real colour-managed values the default 8-bit export uses —
-              not an independently verified 16-bit render, and brightness/contrast/
-              saturation/sharpening are not applied (same as Linear).
+              More than 256 levels per channel for grading headroom, reconstructed
+              between the same real colour-managed values the default 8-bit export
+              uses (docs/79) — not an independently verified 16-bit render, and
+              brightness/contrast/saturation/sharpening are not applied (same as
+              Linear).
             </p>
           ) : null}
 

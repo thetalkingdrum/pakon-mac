@@ -54,7 +54,10 @@
 // t>>14 is the vendor's SAR directly.
 package kcmsclut
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 // EvalU8 is fcn.10018160 on one interleaved RGB u8 triple.
 //
@@ -128,9 +131,20 @@ func EvalU8(in [3]uint8) [3]uint8 {
 // export has more than 256 levels per channel to work with, not a claim of
 // additional vendor-matched accuracy.
 func EvalU16(in [3]uint8) [3]uint16 {
-	offRi, wR := idxOff[0][in[0]], idxWeight[0][in[0]]
-	offGi, wG := idxOff[1][in[1]], idxWeight[1][in[1]]
-	offBi, wB := idxOff[2][in[2]], idxWeight[2][in[2]]
+	return evalU16Core(
+		idxOff[0][in[0]], idxWeight[0][in[0]],
+		idxOff[1][in[1]], idxWeight[1][in[1]],
+		idxOff[2][in[2]], idxWeight[2][in[2]],
+	)
+}
+
+// evalU16Core is EvalU16 with the input-table lookup factored out: given the
+// (offset, weight) triple for R/G/B -- wherever it came from -- it runs the
+// tetrahedron selection, CLUT interpolation and otab blend, unchanged from
+// EvalU16's own original body. The only caller besides EvalU16 is
+// Rpd12ToSrgb16Fine (below), which supplies a finer-resolution table than
+// idxOff/idxWeight's 256 entries instead of a different algorithm.
+func evalU16Core(offRi, wR, offGi, wG, offBi, wB int32) [3]uint16 {
 	base := offRi + offGi + offBi
 
 	var w0, w1, w2, pa, pb int32
@@ -225,6 +239,118 @@ func Rpd12ToSrgb16(rpd [3]int) [3]uint16 {
 	return EvalU16([3]uint8{
 		Rpd12ToU8(rpd[0]), Rpd12ToU8(rpd[1]), Rpd12ToU8(rpd[2]),
 	})
+}
+
+// rpdMax is the F-135 RPD12 ceiling (pakon_ansel.SHASTA_MAX / poly.PolyMax),
+// hardcoded the same way Rpd12ToU8's own 4095 is above -- this package has
+// no shared constant for it.
+const rpdMax = 4095
+
+var (
+	fineIdxOff    [3][rpdMax + 1]int32
+	fineIdxWeight [3][rpdMax + 1]int32
+	fineIdxOnce   sync.Once
+)
+
+// buildFineIdx reconstructs idxOff/idxWeight (the vendor's own captured
+// grid+0x8c table, 256 real (offset, weight) samples per channel -- the
+// ONLY thing standing between a u8 input and a CLUT grid position) at full
+// RPD12 resolution (rpdMax+1 = 4096 points) instead of 256.
+//
+// WHY. Rpd12ToSrgb16 rounds RPD12 (4096 possible codes) down to u8 (256)
+// via Rpd12ToU8 BEFORE the CLUT ever runs -- confirmed the only 8-bit
+// quantisation in the whole pipeline (docs/79 §3): a real frame's toned
+// RPD12 data, which held up to ~1600 distinct codes per channel, collapsed
+// to ~100 distinct CLUT inputs, and EvalU16's own output-side blend cannot
+// recover precision already gone by the time it runs. Confirmed directly
+// against this exact function, not a Python analogue: the same real frame
+// through this real Rpd12ToSrgb16 reproduced Python's pre-fix numbers
+// bit-for-bit (1503/1923/2451 distinct codes).
+//
+// HOW. idxOff[c][v]/step + idxWeight[c][v]/65536 is a continuous grid
+// position for u8 input v -- 256 real samples of a genuinely nonlinear
+// function (confirmed: neither v*GridN/255 nor v*GridN/256 reproduces the
+// real table). This reconstructs that same function at rpdMax+1 points via
+// piecewise-LINEAR interpolation through those 256 real, known-correct
+// samples, evaluated over the same 0..255 domain at RPD12 resolution
+// (Rpd12ToU8's own real scale, 255/4095, just not rounded to an integer
+// first). Linear, not a smoother fit, specifically because it cannot
+// overshoot past the two real samples bracketing any reconstructed point
+// -- it can only interpolate between known-correct vendor behaviour, never
+// invent an excursion past it. Transcribed from
+// pakon_kcms_clut.build_fine_idx (Python), which this is verified against
+// (docs/79 §4/§5).
+//
+// NOT bit-exact to anything the real vendor ever computed: there is no
+// ground truth finer than 256 samples to be exact against.
+func buildFineIdx() {
+	steps := [3]int32{offR, offG, offB}
+	for c := 0; c < 3; c++ {
+		step := steps[c]
+		var posReal [256]float64
+		for v := 0; v < 256; v++ {
+			posReal[v] = float64(idxOff[c][v])/float64(step) +
+				float64(idxWeight[c][v])/65536.0
+		}
+		for i := 0; i <= rpdMax; i++ {
+			vFine := float64(i) * (255.0 / float64(rpdMax))
+			var pos float64
+			switch {
+			case vFine <= 0:
+				pos = posReal[0]
+			case vFine >= 255:
+				pos = posReal[255]
+			default:
+				lo := int(math.Floor(vFine))
+				frac := vFine - float64(lo)
+				pos = posReal[lo] + frac*(posReal[lo+1]-posReal[lo])
+			}
+			cell := int32(math.Floor(pos))
+			if cell < 0 {
+				cell = 0
+			}
+			if cell > GridN-2 {
+				cell = GridN - 2
+			}
+			weight := int32(math.Round((pos - float64(cell)) * 65536.0))
+			if weight < 0 {
+				weight = 0
+			}
+			if weight > 65535 {
+				weight = 65535
+			}
+			fineIdxOff[c][i] = cell * step
+			fineIdxWeight[c][i] = weight
+		}
+	}
+}
+
+// Rpd12ToSrgb16Fine is Rpd12ToSrgb16's precision fix: the same EvalU16
+// tetrahedron/CLUT/otab-blend math (evalU16Core, shared with EvalU16
+// itself), fed buildFineIdx's RPD12-resolution table instead of
+// Rpd12ToU8+idxOff/idxWeight's u8-resolution one -- i.e. Rpd12ToU8's
+// rounding never happens. See buildFineIdx's own docstring for the full
+// derivation and docs/79 for the measurements (~20-26x more distinct
+// output codes on a real frame, visually identical, owner-confirmed in
+// Photoshop: no more banding).
+func Rpd12ToSrgb16Fine(rpd [3]int) [3]uint16 {
+	fineIdxOnce.Do(buildFineIdx)
+	r, g, b := clampRpd(rpd[0]), clampRpd(rpd[1]), clampRpd(rpd[2])
+	return evalU16Core(
+		fineIdxOff[0][r], fineIdxWeight[0][r],
+		fineIdxOff[1][g], fineIdxWeight[1][g],
+		fineIdxOff[2][b], fineIdxWeight[2][b],
+	)
+}
+
+func clampRpd(v int) int32 {
+	if v < 0 {
+		return 0
+	}
+	if v > rpdMax {
+		return rpdMax
+	}
+	return int32(v)
 }
 
 // TetraOf reports which of the six weight orderings an input lands in, using
