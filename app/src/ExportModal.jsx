@@ -86,7 +86,7 @@ export default function ExportModal({ open, onClose, roll, cfg, setCfg, job, run
 
   const { format, colour, template, dest, subfolder } = cfg;
   const put = (k, v) => setCfg((c) => ({ ...c, [k]: v }));
-  const tiffOnly = colour === 'linear' || colour === 'srgb16';
+  const tiffOnly = colour === 'linear' || colour === 'srgb16' || colour === 'srgb16py' || colour === 'srgb16pyfine';
   const effectiveFormat = tiffOnly ? 'tiff' : format;
 
   const toggle = (i) => {
@@ -190,6 +190,8 @@ export default function ExportModal({ open, onClose, roll, cfg, setCfg, job, run
                   ['srgb', 'sRGB · 8-bit'],
                   ['srgb16', 'sRGB · 16-bit'],
                   ['linear', 'Linear · 16-bit'],
+                  ['srgb16py', 'sRGB · 16-bit (Python, EXPERIMENTAL)'],
+                  ['srgb16pyfine', 'sRGB · 16-bit (Python, fine CLUT, EXPERIMENTAL)'],
                 ]}
               />
             </div>
@@ -201,6 +203,27 @@ export default function ExportModal({ open, onClose, roll, cfg, setCfg, job, run
               the same real colour-managed values the default 8-bit export uses —
               not an independently verified 16-bit render, and brightness/contrast/
               saturation/sharpening are not applied (same as Linear).
+            </p>
+          ) : null}
+
+          {colour === 'srgb16py' ? (
+            <p style={{ fontSize: 11.5, color: 'var(--danger-ink)', marginBottom: 12 }}>
+              EXPERIMENTAL, local-only: the same 16-bit blend as "sRGB · 16-bit" above,
+              but through the deprecated Python colour chain instead of Go — testing
+              whether that's possible at all, not a supported export mode. Not
+              vendor-verified above 8 bits, same as the Go version. This does not exist
+              upstream — do not rely on it surviving a rebase.
+            </p>
+          ) : null}
+
+          {colour === 'srgb16pyfine' ? (
+            <p style={{ fontSize: 11.5, color: 'var(--danger-ink)', marginBottom: 12 }}>
+              EXPERIMENTAL, local-only: skips the round-to-8-bit step that feeds the
+              vendor CLUT (the pipeline's one real 8-bit bottleneck) instead of just
+              blending across it — measured ~20-26x more distinct output codes on a
+              real frame than "sRGB · 16-bit (Python)" above. Reconstructed, not
+              vendor-verified, and not bit-exact to anything the real vendor ever
+              computed. Does not exist upstream.
             </p>
           ) : null}
 

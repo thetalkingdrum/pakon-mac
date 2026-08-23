@@ -2051,6 +2051,46 @@ def _render_colour_python(roll: Roll, seg: np.ndarray, p: dict) -> np.ndarray:
     return _quiet(eng.to_srgb, toned)
 
 
+def _render_colour_python16(roll: Roll, seg: np.ndarray, p: dict,
+                            fine: bool = False) -> np.ndarray:
+    """EXPERIMENTAL, Python-only. ``_render_colour_python``'s 16-bit
+    counterpart -- ``pakon_kcms_clut.evaluate16`` in place of the u8
+    ``evaluate``, the same relationship ``_render_colour_go16`` has to
+    ``_render_colour_go``. See that function's docstring for what "16-bit"
+    means and does not mean.
+
+    This function is the answer to "is a Python-side 16-bit export
+    possible", nothing more. It exists ONLY for ``export_frame``'s
+    ``colour="srgb16py"``, deliberately not wired into ``render_frame``'s
+    preview path, and it deliberately does not become the app's real
+    16-bit export: docs/62 §12 commits the colour pipeline to Go, and
+    ``_render_colour_python``'s own docstring already says that engine
+    must not gain features. Un-deprecating the Python engine is a real
+    decision this function does not make on its own.
+    """
+    import warnings
+    warnings.warn(
+        f"EXPERIMENTAL Python-only 16-bit sRGB (colour="
+        f"'srgb16py{'fine' if fine else ''}'). This is NOT the app's real "
+        "16-bit export -- that's Go's kcmsclut.EvalU16 via colour='srgb16'. "
+        "Exists only to test whether a Python-side 16-bit path is "
+        "possible; see docs/62 §12 before wiring this anywhere else.",
+        DeprecationWarning, stacklevel=2)
+    eng = roll.engine()
+    rpd12 = scene_rpd12(
+        seg, roll.data_dir,
+        np.asarray(roll.auto_offsets, dtype=np.float64),
+        roll.model, eng,
+        tuple(roll.film_base) if roll.film_base else None,
+        roll.film_class(),
+    )
+    scale_v = (np.asarray(roll.roll_scale, dtype=np.float64)
+               if roll.roll_scale else None)
+    toned = _quiet(eng.render_scene, rpd12, scale_v)
+    toned = apply_correction(toned, p, eng)
+    return _quiet(eng.to_srgb, toned, 16, fine)
+
+
 def _auto_white_balance_frame(img: np.ndarray) -> np.ndarray:
     """OPT-IN per-frame grey-world white balance (PAKON_AUTO_WB=1).
 
@@ -2283,7 +2323,7 @@ def render_name(template: str, roll: Roll, index: int, ext: str) -> str:
 #: in ``export_frame`` below for the real vendor file this was checked
 #: against).
 def depth_options(colour: str) -> list[int]:
-    if colour in ("linear", "srgb16"):
+    if colour in ("linear", "srgb16", "srgb16py", "srgb16pyfine"):
         return [16]
     return [8]
 
@@ -2309,9 +2349,10 @@ def export_path(roll: Roll, index: int, dest: Path, fmt: str,
     """Where ``export_frame`` would write. Pure — touches no file."""
     ext = {"tiff": "tif", "jpeg": "jpg", "png": "png"}.get(fmt, "tif")
     out = dest / render_name(template, roll, index, ext)
-    # Both 16-bit modes are TIFF-only: uint16 has no honest JPEG/PNG
-    # container in this pipeline's own writers.
-    return out.with_suffix(".tif") if colour in ("linear", "srgb16") else out
+    # 16-bit modes are TIFF-only: uint16 has no honest JPEG/PNG container in
+    # this pipeline's own writers.
+    return (out.with_suffix(".tif")
+           if colour in ("linear", "srgb16", "srgb16py", "srgb16pyfine") else out)
 
 
 def unique_path(out: Path, taken: set | None = None) -> Path:
@@ -2467,6 +2508,46 @@ def export_frame(roll: Roll, index: int, dest: Path, fmt: str = "tiff",
         h, w = img16.shape[:2]
         pc.write_tiff(str(out), w, h,
                       np.ascontiguousarray(img16).astype("<u2").tobytes())
+    elif colour == "srgb16py":
+        # EXPERIMENTAL. pakon_kcms_clut.evaluate16 via the deprecated Python
+        # colour chain -- see _render_colour_python16's own docstring. Not
+        # the app's real 16-bit export (that's "srgb16", above); this exists
+        # only to test whether a Python-side path is possible at all, per
+        # docs/62 §12's "must not gain features" rule -- do not treat this
+        # branch as a default, and do not wire it anywhere a normal export
+        # would reach it unprompted.
+        #
+        # _display_orient applied here (unlike the "srgb16" Go branch above,
+        # which does not) to match render_frame's own 8-bit Python preview
+        # convention -- this output is that same RGB-frame domain, just at
+        # 16 bits. Not a claim that Go's own omission is a bug; out of scope
+        # for this experiment to resolve.
+        seg = roll.slice14(f.a, f.b, 1)
+        srgb16 = _render_colour_python16(roll, seg, p)
+        img16 = _apply_geometry(
+            _display_orient(dec.to_frame_image(srgb16, roll.transport_scale)), p)
+        out = out.with_suffix(".tif")
+        h, w = img16.shape[:2]
+        pc.write_tiff(str(out), w, h,
+                      np.ascontiguousarray(img16).astype("<u2").tobytes())
+    elif colour == "srgb16pyfine":
+        # EXPERIMENTAL. Same as "srgb16py" above, except rpd12_to_icc_u8's
+        # round-to-u8 step (the pipeline's one real 8-bit bottleneck --
+        # docs/78 §6) never happens: pakon_kcms_clut.evaluate_fine16 takes
+        # the un-rounded RPD12 value straight into a reconstructed,
+        # RPD12-resolution CLUT index instead. Measured ~20-26x more
+        # distinct output codes than "srgb16py" on a real frame. Still not
+        # bit-exact to anything the real vendor ever computed -- see
+        # evaluate_fine16's own docstring for exactly what "not invented,
+        # but not verified either" means here.
+        seg = roll.slice14(f.a, f.b, 1)
+        srgb16 = _render_colour_python16(roll, seg, p, fine=True)
+        img16 = _apply_geometry(
+            _display_orient(dec.to_frame_image(srgb16, roll.transport_scale)), p)
+        out = out.with_suffix(".tif")
+        h, w = img16.shape[:2]
+        pc.write_tiff(str(out), w, h,
+                      np.ascontiguousarray(img16).astype("<u2").tobytes())
     else:
         img = render_frame(roll, index, p, scale="full")   # 8-bit by nature
         from PIL import Image
@@ -2481,7 +2562,7 @@ def export_frame(roll: Roll, index: int, dest: Path, fmt: str = "tiff",
     size = out.stat().st_size if out.is_file() else 0
     f.exported = str(out)
     return {"path": str(out), "bytes": size, "frame": index,
-            "depth": 16 if colour in ("linear", "srgb16") else 8}
+            "depth": 16 if colour in ("linear", "srgb16", "srgb16py", "srgb16pyfine") else 8}
 
 
 # --------------------------------------------------------------------------

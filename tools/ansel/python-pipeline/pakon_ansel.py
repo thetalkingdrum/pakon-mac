@@ -1372,7 +1372,8 @@ class AnselEngine:
             acc += scale
         return acc / max(len(scenes), 1)
 
-    def to_srgb(self, rpd12_toned: np.ndarray) -> np.ndarray:
+    def to_srgb(self, rpd12_toned: np.ndarray, depth: int = 8,
+               fine: bool = False) -> np.ndarray:
         from PIL import Image, ImageCms
         # SS129 EXPERIMENT: align each channel onto DRA own paper range.
         # dra-*.dpi carries paperMin=1200 paperMax=2000, and DRA maps LUMINANCE
@@ -1573,7 +1574,38 @@ class AnselEngine:
             print(f"  [EXPERIMENT] DRA pivot: lum median {_med:.0f} -> "
                   f"fixed point {_fp:.0f} (shift {_fp - _med:+.0f}, "
                   f"slope {_g:.4f})")
+        if depth == 16 and fine:
+            # EXPERIMENTAL, Python-only, rebuilding the pipeline's one real
+            # 8-bit bottleneck (docs/78 §6) rather than just blending across
+            # it: feeds pakon_kcms_clut.evaluate_fine16 the un-rounded RPD12
+            # value directly, skipping rpd12_to_icc_u8 entirely -- see that
+            # function's own docstring. Not bit-exact to anything the real
+            # vendor ever computed (there is no finer ground truth), but
+            # recovers the precision rpd12_to_icc_u8 was discarding: measured
+            # ~20-26x more distinct output codes on a real frame than the
+            # plain depth=16 path below.
+            if kcms_clut is None or not kcms_clut.available():
+                raise RuntimeError(
+                    "to_srgb(depth=16, fine=True) needs pakon_kcms_clut's "
+                    "vendor CLUT port")
+            return kcms_clut.evaluate_fine16(
+                np.clip(np.asarray(rpd12_toned, dtype=np.float64), 0, SHASTA_MAX))
+
         u8 = rpd12_to_icc_u8(rpd12_toned)
+
+        if depth == 16:
+            # EXPERIMENTAL, Python-only -- see pakon_kcms_clut.evaluate16's
+            # own docstring for the full scope and its "NOT wired into any
+            # render path" caveat. Not vendor-verified above 8 bits, same as
+            # Go's kcmsclut.EvalU16. No lcms fallback: Pillow has no 16-bit
+            # multi-channel ICC transform to run one through, which is the
+            # same limitation that made this need a dedicated interpolator
+            # in the first place.
+            if kcms_clut is None or not kcms_clut.available():
+                raise RuntimeError(
+                    "to_srgb(depth=16) needs pakon_kcms_clut's vendor CLUT "
+                    "port -- PAKON_ICC_LCMS=1 has no 16-bit path")
+            return kcms_clut.evaluate16(u8)
 
         # docs/74 §171 measured this port's lcms ICC step against the REAL
         # vendor CMM and found it not bit-exact, one-signed, and not a
