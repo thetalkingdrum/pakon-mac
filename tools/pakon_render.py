@@ -155,7 +155,24 @@ DEFAULT_PARAMS: dict = {
 #: Controls drawn in design/frame.html that are deliberately NOT implemented,
 #: with the reason. The UI shows them disabled carrying this text rather than
 #: silently omitting them or, worse, faking them with an invented curve.
+#:
+#: ``key`` is the exact ``params`` field name the UI would otherwise send —
+#: ``merged_params`` drops anything not already a key in ``DEFAULT_PARAMS``,
+#: silently, so a control whose key is listed here but doesn't match what the
+#: frontend actually sends is worse than not listing it at all: the slider
+#: looks live (a client-side CSS filter can preview it instantly), commits,
+#: gets dropped, and reverts the moment the pointer is released -- which is
+#: exactly the bug this list exists to prevent, and exactly what happened
+#: when "sharpen" was listed here while the UI sent "sharpening".
 UNAVAILABLE_CONTROLS: list[dict] = [
+    {
+        "key": "brightness",
+        "label": "Brightness",
+        "reason": "This would duplicate Exposure (density), the vendor's own "
+                  "per-frame brightness control. A second, unrelated "
+                  "brightness curve on top of it would not be vendor "
+                  "processing, just an invented one.",
+    },
     {
         "key": "contrast",
         "label": "Contrast",
@@ -171,7 +188,21 @@ UNAVAILABLE_CONTROLS: list[dict] = [
                   "one would put invented processing in the image path.",
     },
     {
-        "key": "sharpen",
+        "key": "highlights",
+        "label": "Highlights",
+        "reason": "No per-tone-region highlight recovery has been traced in "
+                  "TLB.dll. Adding one would put invented processing in the "
+                  "image path.",
+    },
+    {
+        "key": "shadows",
+        "label": "Shadows",
+        "reason": "No per-tone-region shadow lift has been traced in "
+                  "TLB.dll. Adding one would put invented processing in the "
+                  "image path.",
+    },
+    {
+        "key": "sharpening",
         "label": "Sharpening",
         "reason": "The vendor sharpens inside Ansel, not as a host-side "
                   "unsharp mask. Not ported; a host-side mask would not match.",
