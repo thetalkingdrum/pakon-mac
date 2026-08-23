@@ -475,6 +475,54 @@ def _vendor_invert_lut(n: int = VENDOR_INVERT_ENTRIES) -> np.ndarray:
     return out
 
 
+def _rpd12_to_raw14(film_base, data_dir: str, model: str, film_class: int):
+    """Invert the stage-2 polynomial: which raw 14-bit sensor triple would
+    have produced this RPD12 ``film_base`` value.
+
+    Factored out of ``_vendor_invert_anchor`` (below), which needs exactly
+    this recovery step on its way to computing the vendor-invert anchor, so
+    the anchor and any UI readout of "film base, in the same domain the
+    histogram plots" can never quietly disagree on what the inversion means.
+
+    Same 3-D Newton solve, same convergence check: returns ``None`` rather
+    than a guess when ``film_base`` is missing/invalid or the solve does not
+    converge.
+    """
+    if model != "f135" or film_base is None:
+        return None
+    fb = np.asarray(film_base, dtype=np.float64)
+    if fb.size != 3 or np.any(fb <= 0):
+        return None
+    rpd_max = pc.RPD_MAX_BY_MODEL[model]
+
+    def off_poly(tri):
+        # stage-2 poly output in RPD12 — the domain roll.film_base lives in.
+        # offset is unused on the F-135 poly path (see _rpd16), so zeros here
+        # match how the roll film base was measured.
+        r16 = _rpd16(np.asarray(tri, np.int32), data_dir, np.zeros(3),
+                     model=model, film_class=film_class)
+        return ansel.rpd16_to_rpd12(r16, rpd_max)
+
+    x = np.array([8000.0, 8000.0, 8000.0])
+    h = 20.0
+    for _ in range(60):
+        r = off_poly(x.reshape(1, 1, 3)).reshape(3) - fb
+        if np.max(np.abs(r)) < 0.3:
+            break
+        jac = np.empty((3, 3))
+        for j in range(3):
+            xp = x.copy()
+            xp[j] += h
+            jac[:, j] = (off_poly(xp.reshape(1, 1, 3)).reshape(3) - fb - r) / h
+        try:
+            x = np.clip(x + np.linalg.solve(jac, -r), 1.0, 16383.0)
+        except np.linalg.LinAlgError:
+            return None
+    if np.max(np.abs(off_poly(x.reshape(1, 1, 3)).reshape(3) - fb)) > 2.0:
+        return None                                  # did not converge — do not guess
+    return x
+
+
 @lru_cache(maxsize=8)
 def _vendor_invert_anchor(film_base, fpo, data_dir, model, film_class):
     """Per-roll film-base re-anchor for the ``PAKON_VENDOR_INVERT=1`` path.
@@ -534,21 +582,15 @@ def _vendor_invert_anchor(film_base, fpo, data_dir, model, film_class):
     missing/sentinel film base, or the Newton fails to converge — in which case
     the caller leaves the invert-ON output untouched rather than guessing).
     """
-    if model != "f135" or film_base is None or fpo is None:
+    if model != "f135" or fpo is None:
         return None, None
-    fb = np.asarray(film_base, dtype=np.float64)
     fpo_a = np.asarray(fpo, dtype=np.float64)
-    if fb.size != 3 or fpo_a.size != 3 or np.any(fb <= 0):
+    if fpo_a.size != 3:
+        return None, None
+    x = _rpd12_to_raw14(film_base, data_dir, model, film_class)
+    if x is None:
         return None, None
     rpd_max = pc.RPD_MAX_BY_MODEL[model]
-
-    def off_poly(tri):
-        # stage-2 poly output in RPD12 — the domain roll.film_base lives in.
-        # offset is unused on the F-135 poly path (see _rpd16), so zeros here
-        # match how the roll film base was measured.
-        r16 = _rpd16(np.asarray(tri, np.int32), data_dir, np.zeros(3),
-                     model=model, film_class=film_class)
-        return ansel.rpd16_to_rpd12(r16, rpd_max)
 
     def on_poly(tri):
         lut = _vendor_invert_lut()
@@ -557,24 +599,6 @@ def _vendor_invert_anchor(film_base, fpo, data_dir, model, film_class):
                      model=model, film_class=film_class)
         return ansel.rpd16_to_rpd12(r16, rpd_max)
 
-    # Recover the raw 14-bit clear-base triple: solve off_poly(x) == film_base.
-    x = np.array([8000.0, 8000.0, 8000.0])
-    h = 20.0
-    for _ in range(60):
-        r = off_poly(x.reshape(1, 1, 3)).reshape(3) - fb
-        if np.max(np.abs(r)) < 0.3:
-            break
-        jac = np.empty((3, 3))
-        for j in range(3):
-            xp = x.copy()
-            xp[j] += h
-            jac[:, j] = (off_poly(xp.reshape(1, 1, 3)).reshape(3) - fb - r) / h
-        try:
-            x = np.clip(x + np.linalg.solve(jac, -r), 1.0, 16383.0)
-        except np.linalg.LinAlgError:
-            return None, None
-    if np.max(np.abs(off_poly(x.reshape(1, 1, 3)).reshape(3) - fb)) > 2.0:
-        return None, None                       # did not converge — do not guess
     L = on_poly(x.reshape(1, 1, 3)).reshape(3)
     o_full = fpo_a - L
     o_color = o_full - float(o_full.min())
@@ -2182,9 +2206,22 @@ def frame_histogram(roll: Roll, index: int, params: dict | None = None) -> dict:
     # is the count of samples that hit the sensor's bottom code, not a
     # statement about the print.
     floored = float((seg <= 1).mean() * 100.0)
+    # roll.film_base lives in the RPD12 domain (post stage-2 polynomial),
+    # not this histogram's raw14 one -- the two are NOT the same quantity
+    # and do not numerically compare. This inverts film_base back through
+    # the polynomial so the UI has a raw14-domain figure it CAN compare
+    # against `dmin` at a glance. None when there is no film_base yet, or
+    # the inversion does not converge -- never a guessed number.
+    film_base_raw14 = None
+    if roll.film_base:
+        x = _rpd12_to_raw14(roll.film_base, roll.data_dir, roll.model,
+                            roll.film_class())
+        if x is not None:
+            film_base_raw14 = [round(float(v), 1) for v in x]
     return {
         "hist": hist,
         "dmin": [round(v, 1) for v in dmin],
+        "film_base_raw14": film_base_raw14,
         "clipped_pct": round(clipped, 3),
         "clipped_shadow_pct": round(floored, 3),
         "lines": [f.a, f.b],

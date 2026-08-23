@@ -459,9 +459,19 @@ export default function FrameEditor({ roll, setRoll, sel, setSel }) {
             <Plot hist={hist} channel={plotCh} params={params} setPending={setPending} commit={commit} />
             <div className="clip" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--mute)' }}>
               <span>Shadows <b>{hist ? `${hist.clipped_shadow_pct?.toFixed(2) ?? '0.00'}%` : '—'}</b></span>
-              <span>Dmin <b>{hist ? hist.dmin.map((v) => v.toFixed(0)).join('·') : '—'}</b></span>
+              {/* This frame's own raw14 99th percentile -- NOT the same
+                  quantity as film_base below (different domain, RPD12 vs
+                  raw14; different population, this frame's content vs the
+                  roll's measured/typed clear-base). Renamed from "Dmin" to
+                  stop implying they're the same number. */}
+              <span>P99 (raw) <b>{hist ? hist.dmin.map((v) => v.toFixed(0)).join('·') : '—'}</b></span>
               <span>Highlights <b>{hist ? `${hist.clipped_pct.toFixed(2)}%` : '—'}</b></span>
             </div>
+            {hist?.film_base_raw14 && (
+              <div className="clip" style={{ display: 'flex', justifyContent: 'flex-end', fontSize: 11, color: 'var(--mute)', marginTop: 2 }}>
+                <span>Film base (raw) <b>{hist.film_base_raw14.map((v) => v.toFixed(0)).join('·')}</b></span>
+              </div>
+            )}
           </Grp>
 
           <Grp title="Adjustments">
