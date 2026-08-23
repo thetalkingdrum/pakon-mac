@@ -43,6 +43,15 @@ export const sessionState = () => get('/api/app/session');
 export const rolls = () => get('/api/app/rolls');
 export const roll = (id) => get(`/api/app/roll/${id}`);
 export const diagnostics = () => get('/api/app/diagnostics');
+/** The catalog of render-affecting PAKON_* research flags, each with its
+ *  live value, plus any other PAKON_* var set in the backend's own process
+ *  that the catalog doesn't know about yet. */
+export const flags = () => get('/api/app/flags');
+/** Set/unset research flags in the running backend process (not persisted —
+ *  gone on the next launch). Frame renders read these live, so the very next
+ *  image request reflects the change; the backend's Cache-Control is
+ *  "no-cache" with an ETag folding in every PAKON_* var for exactly this. */
+export const setFlags = (body) => post('/api/app/flags', body);
 /** The per-unit calibration store, and — only when there is nothing stored
  *  yet and no scan is running — whether a first read is possible now.
  *

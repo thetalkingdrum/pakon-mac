@@ -3,6 +3,7 @@
 // just without a rail of read-only settings and machine telemetry beside it.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AdjustmentSlider, Btn, Chip, Grp, Rail, RailHead, Spinner } from './components';
+import ResearchFlags from './ResearchFlags';
 import * as api from './api';
 
 /* ── the plot: histogram of the 14-bit source, with the roll's own levels ──
@@ -239,6 +240,7 @@ export default function FrameEditor({ roll, setRoll, sel, setSel }) {
   const [applyPlan, setApplyPlan] = useState(null);
   const [imgFailed, setImgFailed] = useState(null);
   const [imgNonce, setImgNonce] = useState(0);
+  const [flagsOpen, setFlagsOpen] = useState(false);
   useEffect(() => { setImgFailed(null); }, [roll.id, sel, sharp]);
   const settle = useRef(null);
 
@@ -258,7 +260,7 @@ export default function FrameEditor({ roll, setRoll, sel, setSel }) {
     setHist(null);
     api.get(api.histUrl(roll.id, sel)).then((h) => alive && setHist(h)).catch(() => {});
     return () => { alive = false; };
-  }, [roll?.id, sel, frame?.version]);
+  }, [roll?.id, sel, frame?.version, imgNonce]);
 
   const commit = useCallback(
     async (next) => {
@@ -432,6 +434,9 @@ export default function FrameEditor({ roll, setRoll, sel, setSel }) {
             <Btn variant={params.flip_v ? 'primary' : 'flat'} onClick={() => commit({ ...params, flip_v: !params.flip_v })}>
               Vertical
             </Btn>
+            <Btn variant="flat" style={{ marginLeft: 8 }} onClick={() => setFlagsOpen(true)}>
+              Research flags…
+            </Btn>
             <span className="sp" />
             <span className="quiet" style={{ whiteSpace: 'nowrap' }}>
               {sharp ? 'half-res' : 'quarter-res'} · full quality at export
@@ -509,6 +514,12 @@ export default function FrameEditor({ roll, setRoll, sel, setSel }) {
           </Grp>
         </Rail>
       </div>
+
+      <ResearchFlags
+        open={flagsOpen}
+        onClose={() => setFlagsOpen(false)}
+        onApplied={() => setImgNonce((n) => n + 1)}
+      />
     </>
   );
 }

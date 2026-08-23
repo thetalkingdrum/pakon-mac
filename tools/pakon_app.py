@@ -30,6 +30,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -2293,6 +2294,9 @@ class H(_BASE):                                     # type: ignore[misc,valid-ty
         if route == "diagnostics":
             return _json(self, diagnostics())
 
+        if route == "flags":
+            return _json(self, research_flags_state())
+
         if route.startswith("job/"):
             j = S.job_get(route[4:])
             return _json(self, j or {"error": "unknown job"},
@@ -2450,6 +2454,22 @@ class H(_BASE):                                     # type: ignore[misc,valid-ty
 
         if route == "workspace/purge":
             return _json(self, purge(body))
+
+        if route == "flags":
+            # {"set": {"NAME": "value", ...}, "unset": ["NAME", ...]}. Any
+            # PAKON_* name is accepted, not just RESEARCH_FLAGS's own catalog
+            # -- a flag the catalog doesn't know about yet is still settable,
+            # just not pre-populated with a hint. Anything NOT starting
+            # PAKON_ is refused: this edits research flags, not the process's
+            # general environment.
+            for k in list((body.get("set") or {}).keys()) + list(body.get("unset") or []):
+                if not re.fullmatch(r"PAKON_[A-Z0-9_]+", k):
+                    return _json(self, {"error": f"not a PAKON_* flag name: {k}"}, 400)
+            for k, v in (body.get("set") or {}).items():
+                os.environ[k] = str(v)
+            for k in (body.get("unset") or []):
+                os.environ.pop(k, None)
+            return _json(self, research_flags_state())
 
         # ---- calibration ----
         if route == "calibration/read":
@@ -3072,6 +3092,144 @@ def calibration_select(body: dict) -> dict:
     except KeyError:
         return {"error": f"no stored calibration named {stamp}"}
     return calibration_store_state()
+
+
+#: The render-affecting PAKON_* research flags, one place so the flags panel
+#: and the actual env var it edits can never quietly disagree on what exists.
+#: Deliberately excludes flags that don't touch a live render: PAKON_PYTHON
+#: (interpreter choice), PAKON_CALIBRATION_DIR/PAKON_FX35_ROOT (data paths),
+#: PAKON_USB_GUARD_QUIET (hardware guard noise), PAKON_ACC_SCALE (a separate
+#: QA script, pakon_acceptance.py, not the render path this app serves).
+#:
+#: "kind" drives the UI widget: "bool" flags read/write "1" vs unset, except
+#: PAKON_VENDOR_ORIENT which is on when UNSET and "0" turns it off -- its own
+#: default is inverted, so it is "bool_inverted". Everything else is "text":
+#: a free string, some flags' own units the code below does not interpret.
+#:
+#: "engine": which PAKON_COLOUR_ENGINE this flag is read under -- "python"
+#: (pakon_decode.py / ansel/python-pipeline/pakon_ansel.py, only reached via
+#: _render_colour_python) or "go" (pakon_colour_go.py / the ColourRequest
+#: pakon_render._go_request builds, only reached via _render_colour_go).
+#: None means engine-agnostic -- read in render_frame() itself, after either
+#: engine has already produced sRGB. Traced by which file/call path each
+#: os.environ.get() actually sits in, not guessed from the name; get this
+#: wrong and the flags panel would dim/warn on the wrong half.
+RESEARCH_FLAGS = [
+    {"group": "Engine & invert", "name": "PAKON_COLOUR_ENGINE", "kind": "text", "engine": None,
+     "hint": "Which engine runs the colour chain: \"python\" (the ported, "
+             "verified chain) or \"go\" (the product path/default; the tone "
+             "stand-in unless PAKON_REAL_AUTOTONE is also set)."},
+    {"group": "Engine & invert", "name": "PAKON_VENDOR_INVERT", "kind": "bool", "engine": "python",
+     "hint": "F-135 inversion via the vendor's fixed steep table (3500 "
+             "codes/decade) before stage 2, instead of this port's own log "
+             "invert (1000/decade) after it."},
+    {"group": "Engine & invert", "name": "PAKON_VENDOR_INVERT_ANCHOR", "kind": "text", "engine": "python",
+     "hint": "How PAKON_VENDOR_INVERT re-anchors film_base to fpo: "
+             "\"balance\" (default) keeps deep blacks, \"full\" is neutral "
+             "but washed, \"none\" is legacy (blue cast). Inert unless "
+             "PAKON_VENDOR_INVERT is also on."},
+    {"group": "Engine & invert", "name": "PAKON_SETSHIFTS_IDENTITY", "kind": "bool", "engine": "python",
+     "hint": "Make setShifts(1,2) identity for the CN config (capture-"
+             "verified 6/6), dropping a spurious ~70 the shipped 3-band LUT "
+             "introduces."},
+    {"group": "Engine & invert", "name": "PAKON_NO_INVERT", "kind": "bool", "engine": "python",
+     "hint": "Skip the F-135 invert entirely -- for a chain already fed "
+             "vendor-domain/positive data, or measuring a downstream stage "
+             "in isolation. Inert whenever PAKON_VENDOR_INVERT is on: that "
+             "branch returns before this is ever checked."},
+    {"group": "Engine & invert", "name": "PAKON_REAL_AUTOTONE", "kind": "bool", "engine": "python",
+     "hint": "Run the ported, Unicorn-verified analyzeAutoTone chain "
+             "instead of the ShastaToneRpd stand-in."},
+    {"group": "Engine & invert", "name": "PAKON_VENDOR_ORIENT", "kind": "bool_inverted", "engine": None,
+     "hint": "Apply the vendor's rot90(k=+1) display orientation. ON by "
+             "default; unchecking sets it to \"0\"."},
+    {"group": "Engine & invert", "name": "PAKON_VENDOR_FRAMING", "kind": "bool", "engine": None,
+     "hint": "Derive frame boundaries from the vendor's line-array cascade "
+             "instead of Otsu. Structural, not yet bit-exact."},
+    {"group": "Engine & invert", "name": "PAKON_AUTO_WB", "kind": "bool", "engine": None,
+     "hint": "Apply an automatic white-balance pass after rendering, after "
+             "either engine has already produced sRGB."},
+    {"group": "Engine & invert", "name": "PAKON_PER_FRAME_SHIFTS", "kind": "text", "engine": "python",
+     "hint": "Per-frame balance triple source, routed via "
+             "set_balance_shift() -- research seam, not a shipped feature."},
+    {"group": "Go engine request fields", "name": "PAKON_ICC_INPUT", "kind": "text", "engine": "go",
+     "hint": "Bit depth feeding the ICC step, in the Go ColourRequest. "
+             "Default \"u12\"."},
+    {"group": "Go engine request fields", "name": "PAKON_STAGE_ORDER", "kind": "text", "engine": "go",
+     "hint": "Order of the FUGC/Shasta tone stages, in the Go ColourRequest. "
+             "Default \"fugc-shasta\"."},
+    {"group": "Go engine request fields", "name": "PAKON_COEFF_SOURCE", "kind": "text", "engine": "go",
+     "hint": "Where colour-matrix coefficients come from, in the Go "
+             "ColourRequest. Default \"eeprom\"."},
+    {"group": "Go engine request fields", "name": "PAKON_NATIVE_UNVERIFIED", "kind": "bool", "engine": "go",
+     "hint": "Let the Go native colour path run even though it is not "
+             "verified -- overrides a guard, not a colour choice."},
+    {"group": "ICC (Python engine)", "name": "PAKON_ICC_LCMS", "kind": "bool", "engine": "python",
+     "hint": "Use lcms for the ICC step instead of the vendor's own ported "
+             "tetrahedral CLUT interpolator (lcms reads ~1.8 codes dark)."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_TONE_PER_CHANNEL", "kind": "bool", "engine": "python",
+     "hint": "Apply tone per-channel instead of luma-only."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_ZERO_SHIFT", "kind": "bool", "engine": "python",
+     "hint": "Force setShifts to zero -- isolates what the shift itself "
+             "contributes. Runs before PAKON_VENDOR_A in the same chain: "
+             "PAKON_VENDOR_A overwrites this rather than combining with it."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_VENDOR_A", "kind": "bool", "engine": "python",
+     "hint": "Use the vendor's own captured A balance term, whole -- "
+             "replaces PAKON_ZERO_SHIFT/PAKON_K's result rather than "
+             "combining with it."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_VENDOR_CHROMA", "kind": "bool", "engine": "python",
+     "hint": "Use the vendor's own captured chroma term, keeping this "
+             "port's own luma. Runs after PAKON_VENDOR_A in the same chain."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_APPLY_SRA", "kind": "bool", "engine": "python",
+     "hint": "Apply the SRA stage."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_FUGC_SPAN", "kind": "bool", "engine": "python",
+     "hint": "Probe on the FUGC LUT span."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_DRA_BOUNDS", "kind": "bool", "engine": "python",
+     "hint": "Probe on DRA bounds."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_DRA_PIVOT", "kind": "bool", "engine": "python",
+     "hint": "Probe on the DRA pivot."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_DRA_PIVOT_SLOPE", "kind": "bool", "engine": "python",
+     "hint": "Probe on the DRA pivot slope."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_PAPER_ALIGN", "kind": "bool", "engine": "python",
+     "hint": "Probe: paper alignment stage."},
+    {"group": "Tone / Ansel research probes (Python engine)", "name": "PAKON_PAPER_ALIGN_LUMA", "kind": "bool", "engine": "python",
+     "hint": "Probe: paper alignment on luma."},
+    {"group": "Fine-tuning overrides (research, Python engine)", "name": "PAKON_UNIFORM_ANCHOR", "kind": "text", "engine": "python",
+     "hint": "Override the anchor uniformly."},
+    {"group": "Fine-tuning overrides (research, Python engine)", "name": "PAKON_FPO_DELTA", "kind": "text", "engine": "python",
+     "hint": "Override the per-frame balance delta scalar directly."},
+    {"group": "Fine-tuning overrides (research, Python engine)", "name": "PAKON_FPO_DELTA3", "kind": "text", "engine": "python",
+     "hint": "Override the fpo delta as a 3-vector."},
+    {"group": "Fine-tuning overrides (research, Python engine)", "name": "PAKON_LINEAR_SHIFT", "kind": "bool", "engine": "python",
+     "hint": "Apply setShifts in the LINEAR domain, before the log, instead "
+             "of after."},
+    {"group": "Fine-tuning overrides (research, Python engine)", "name": "PAKON_ORDER_FPO", "kind": "text", "engine": "python",
+     "hint": "Override orderFpo directly."},
+    {"group": "Fine-tuning overrides (research, Python engine)", "name": "PAKON_BLACK_POINT", "kind": "text", "engine": "python",
+     "hint": "Override the black point."},
+    {"group": "Fine-tuning overrides (research, Python engine)", "name": "PAKON_BLACK_WHITE", "kind": "text", "engine": "python",
+     "hint": "Override black/white points."},
+    {"group": "Fine-tuning overrides (research, Python engine)", "name": "PAKON_K", "kind": "text", "engine": "python",
+     "hint": "Override the K coefficient."},
+]
+
+_RESEARCH_FLAG_NAMES = {f["name"] for f in RESEARCH_FLAGS}
+
+
+def research_flags_state() -> dict:
+    """Every research flag's catalog entry plus its live value (None if
+    unset), and any OTHER PAKON_* var actually set in this process that the
+    catalog above does not know about -- so a flag added to the code but not
+    yet to this list is still visible instead of silently invisible."""
+    catalog = [dict(f, value=os.environ.get(f["name"])) for f in RESEARCH_FLAGS]
+    extra = sorted(k for k in os.environ
+                   if k.startswith("PAKON_") and k not in _RESEARCH_FLAG_NAMES
+                   and k not in ("PAKON_PYTHON", "PAKON_DEV_SERVER"))
+    return {
+        "flags": catalog,
+        "extra": [{"name": k, "value": os.environ.get(k)} for k in extra],
+        "fingerprint": render_env_fingerprint(),
+    }
 
 
 def diagnostics() -> dict:
