@@ -1,14 +1,21 @@
 # 79 — EXPERIMENTAL Python 16-bit sRGB export, a real bottleneck confirmed in Go's shipped path, and the fix landed in Go the same session
 
-Branch: `experimental-tlx-raw-import`, commit `8cef5e0` (Part 1/2, Python
-experiment) plus a follow-up commit landing §6 (the Go fix). Local only, not
-pushed to any remote by the owner's own explicit choice.
+§1–§5 (the Python investigation that found and diagnosed the bug) happened
+on branch `experimental-tlx-raw-import`, commit `8cef5e0` — still
+EXPERIMENTAL and Python-only, and stays on that branch only, per `docs/62
+§12`.
 
-**Status: §3's bug is fixed in the real product path, same session.** §1–§4
-are the Python investigation that found and diagnosed it (still
-EXPERIMENTAL and Python-only, stays off any shared branch per `docs/62
-§12`); §6 is what actually shipped — real code in `tools/ansel/pipeline`,
-the same Go colour pipeline `docs/62 §12` commits to.
+§6 (what actually shipped) lives on its own branch, `go-16bit-srgb-export`,
+based on `main` — deliberately NOT on `experimental-tlx-raw-import`, so
+this real Go fix isn't tangled with that branch's TLX-import-specific work
+or the Python experiment above it. That branch is `main` +
+`8d511be` (the base 16-bit export feature this fixes, itself not
+TLX-specific — see docs/78 §1) + this commit. Local only, not pushed to any
+remote by the owner's own explicit choice.
+
+**Status: §3's bug is fixed in the real product path, same session.** §6 is
+real code in `tools/ansel/pipeline`, the same Go colour pipeline `docs/62
+§12` commits to — a mergeable, self-contained branch on its own.
 
 ---
 
