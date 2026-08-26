@@ -726,6 +726,252 @@ const HOOKS = [
           'insn `mov eax, fs:[0]` is 6 bytes (>= 5), MinHook 5-byte patch safe ' +
           '(approximate=0). TIER 3 (static mapping), NOT yet live-confirmed.',
   },
+
+  // v54 -- the frame->grid sampler INPUT, the last unported colour piece.
+  //
+  // AnsImageData::blockAverage (fcn.100d9930, __thiscall, ecx = SOURCE
+  // AnsImageData). Block-averages a resized "analysis image" into the 24x36x6
+  // SBA grid -- that grid IS measure_samples, already the input to the
+  // bit-exact grid -> balance A path. The one remaining unported colour stage
+  // is the sampler that PRODUCES the grid; porting it needs its INPUT, the
+  // analysis image, on a real frame. This hook captures that: the src header
+  // (dims @+0xc/+0x10, layout @+0x4, pixptr @+0x20) and the analysis-image
+  // pixels via a single deref of *(ecx+0x20) -- the same 1-deref pattern as
+  // framing_lines / area pixel_data. Grid OUTPUT is matched offline against the
+  // existing measure_samples dump. OFF by default (opt-in via hooks.cfg): per
+  // image, not per pixel, but may run on several images per scan.
+  {
+    dll: 'PakonIMAu.dll', va: 0x100d9930, id: 'sba_block_average',
+    role: 'stage', pixelBuffer: true,
+    desc: 'AnsImageData::blockAverage (__thiscall, ecx = SOURCE AnsImageData). ' +
+          'Block-averages the resized analysis image into the 24x36x6 SBA grid ' +
+          '(= measure_samples). Captures its INPUT -- the analysis image (dims ' +
+          '@+0xc/+0x10, layout @+0x4, pixptr @+0x20) -- so the last unported ' +
+          'colour stage, the frame->grid sampler, can be ported; grid output = ' +
+          'measure_samples, and everything downstream (grid -> balance A) is ' +
+          'already bit-exact, no DLL. OFF by default (opt-in via hooks.cfg): ' +
+          'per-image not per-pixel, but may run on several images per scan.',
+    cite: 'RE 2026-08-24, /tmp/pakon_re/sampler/, PakonIMAu.dll md5 ' +
+          'eea9dcf78ee21d4f7c515a6c2512242d: fcn.100d9930 = ' +
+          'AnsImageData::blockAverage (embedded strings AnsImageData::' +
+          'blockAverage @0x10584430, "The source and destination images can ' +
+          'not be the same." @0x1058444c; source AnsImageData.cpp). r2 af+pdf ' +
+          'confirms a real function boundary at 0x100d9930 (~1621 B). Prologue ' +
+          '6A FF 68 A1 D0 51 10 = push -1 (2 B) + push 0x1051d0a1 (5 B) = 7 ' +
+          'bytes / 2 whole instructions, both push-immediate (no relative ' +
+          'jmp/call, no RIP-relative operand), MinHook 5-byte patch safe ' +
+          '(approximate=0). Asserts integer scale @0x100d9d09 (line 501) / ' +
+          '0x100d9d44 (line 509).',
+  },
+
+  // v55 -- the frame->grid sampler, RTTI-PINNED. (docs/74; RE 2026-08-24,
+  // /tmp/pakon_re/sampler/.)
+  //
+  // v54 hooked AnsImageData::blockAverage (fcn.100d9930) and got ZERO records:
+  // that block-average is pan-detect's, NOT the SBA grid-fill (measure_samples
+  // still fired 18x). An RTTI walk pinned the real grid-fill op instead:
+  // ImaBlockAverageOpTT<short,double>::process = fcn.10154ea0, the ONLY
+  // concrete block-average op class in the DLL, reached by the dynamically-
+  // dispatched "paxelize-BlockAveraged" ImaResampleOp. Its src/dst PIXELS are
+  // 3 derefs deep at that boundary (unreachable by any existing dump mode), so
+  // A only CONFIRMS the op fires + captures the block factor and analysis DIMS;
+  // the clean 1-deref analysis-pixel capture is B (convertInterleaveToPlanar).
+  // C is the task-requested resize-EXIT fallback for the analysis dims.
+  //
+  // Provenance (RTTI, tier 3): TD 0x10697fd8 (.?AV?$ImaBlockAverageOpTT@FN@@)
+  // -> COL 0x105e6360 -> vtable 0x1058ddf4 slot 10 = 0x10154ea0. All three VAs
+  // re-verified 2026-08-24 vs PakonIMAu.dll md5 eea9dcf78ee21d4f7c515a6c2512242d
+  // (r2 af+pdf real function boundary; MinHook-safe prologue). OFF by default
+  // (opt-in via hooks.cfg).
+  {
+    dll: 'PakonIMAu.dll', va: 0x10154ea0, id: 'paxelize_blockavg_op',
+    role: 'stage', pixelBuffer: false,
+    desc: 'ImaBlockAverageOpTT<short,double>::process (fcn.10154ea0, ' +
+          '__thiscall, ecx = the OP object) -- the RTTI-pinned handler the ' +
+          '"paxelize-BlockAveraged" ImaResampleOp dispatches to, i.e. the SBA ' +
+          'grid-fill. Reads the block factor at op+0x108 (dest holder op+0x104) ' +
+          'and the resample CONTEXT at arg0 (dst rect @+0x30..0x3c, SOURCE ' +
+          'analysis image @+0x40). Dumps the op fields, the context, and the ' +
+          'src image header (dims @+0x34/+0x38, stride @+0x44) -- and, ' +
+          'critically, CONFIRMS the op fires (v54 missed the wrong ' +
+          'block-average). Src/dst pixels are 3 pointer-levels deep here, so ' +
+          'no pixel row; B captures them. OFF by default (opt-in via hooks.cfg).',
+    cite: 'RE 2026-08-24, /tmp/pakon_re/sampler/ (RTTI walk: TD 0x10697fd8 -> ' +
+          'COL 0x105e6360 -> vtable 0x1058ddf4 slot 10 = 0x10154ea0), ' +
+          'PakonIMAu.dll md5 eea9dcf78ee21d4f7c515a6c2512242d: r2 af+pdf real ' +
+          'function boundary (988 B, 0x10154ea0-0x1015528e), ZERO E8 callers ' +
+          '(vtable-dispatched, as a name-registered op must be). Prologue ' +
+          '6A FF 68 13 93 52 10 = push -1 (2 B) + push 0x10529313 (5 B) = 7 ' +
+          'bytes / 2 whole push-immediate instructions (no relative jmp/call, ' +
+          'no RIP-relative operand), MinHook 5-byte patch safe (approximate=0). ' +
+          'Asserts "BlockAverage factor must be positive"/ImaBlockAverageOp.h ' +
+          '@0x10154f1a.',
+  },
+  {
+    dll: 'PakonIMAu.dll', va: 0x101c0890, id: 'dsba_intlv_to_planar',
+    role: 'stage', pixelBuffer: true,
+    desc: 'AnsDSbaCapabilityImpl::convertInterleaveToPlanar (fcn.101c0890) -- ' +
+          'the CLEAN analysis-image pixel capture on the DSBA/SBA path. Reads ' +
+          'an AnsImageData SOURCE at arg1 ([ebp+0xc]): h @+0x10, w @+0xc, bands ' +
+          '@+0x14, layout @+0x4, pixels at +0x20 (the SAME +0x20 AnsImageData ' +
+          'pixptr the area image uses). Dumps src_desc (the 0x24 header) and ' +
+          'src_pixels via DEREF_PTR(idx=1, off=0x20) -- exactly the 1-deref ' +
+          'pattern area pixel_data uses. This is the piece that closes the ' +
+          'port: block-average B\'s pixels offline and compare to ' +
+          'measure_samples[bands 0-2]. Real entry 0x101c0890 (NOT 0x101c0893, ' +
+          'which is mid-prologue). OFF by default (opt-in via hooks.cfg).',
+    cite: 'RE 2026-08-24, /tmp/pakon_re/sampler/, PakonIMAu.dll md5 ' +
+          'eea9dcf78ee21d4f7c515a6c2512242d: r2 af+pdf real function boundary ' +
+          '(549 B, 0x101c0890-0x101c0ab5); afi @0x101c0893 resolves to the same ' +
+          'fcn.101c0890, confirming 0x101c0893 is mid-prologue not an entry. ' +
+          'Prologue 55 8B EC 6A FF 68 = push ebp (1 B) + mov ebp,esp (2 B) + ' +
+          'push -1 (2 B) = 5 bytes / 3 whole instructions, position-independent ' +
+          '(no relative jmp/call, no RIP-relative operand), MinHook 5-byte patch ' +
+          'safe (approximate=0). Single caller fcn.101c1120 @0x101c126d.',
+  },
+  {
+    dll: 'PakonIMAu.dll', va: 0x100d8030, id: 'resample_analysis_img',
+    role: 'stage', pixelBuffer: false,
+    desc: 'pathUtils::resampleAnslysisImage (fcn.100d8030, cdecl) -- FALLBACK ' +
+          'for the analysis DIMS only. Resizes the frame into the ' +
+          'proportionally-scaled "analysis image" (dest = ' +
+          'round(src*target/max(w,h))) that the block-average later consumes. ' +
+          'Hooked ON EXIT: arg0 is the out ptr-to-descPtr, so ' +
+          'DEREF_PTR(idx=0, off=0) does the one deref to the finished analysis ' +
+          'descriptor (dims + pixptr). Its PIXELS need a 3rd deref (not ' +
+          'capturable here); this row settles the dims so B\'s source can be ' +
+          'identified as pre- or post-average. OFF by default (opt-in).',
+    cite: 'docs/74 sampler UPDATE 3; RE 2026-08-24, /tmp/pakon_re/sampler/, ' +
+          'PakonIMAu.dll md5 eea9dcf78ee21d4f7c515a6c2512242d: r2 af+pdf real ' +
+          'function boundary (1047 B, 0x100d8030-0x100d8447). Prologue ' +
+          '55 8B EC 6A FF 68 = push ebp + mov ebp,esp + push -1 = 5 bytes / 3 ' +
+          'whole position-independent instructions (no relative jmp/call, no ' +
+          'RIP-relative operand), MinHook 5-byte patch safe (approximate=0). ' +
+          'Single caller fcn.100d85c0 (apuPutAnalysisImageInPortfolio).',
+  },
+  // ---- v56: frame->grid sampler diagnostic (docs/74 sampler UPDATE 8/9) ----
+  // HOOK 1 (essential): the LATCH, PROVEN to fire on the regular SBA path.
+  {
+    dll: 'PakonIMAu.dll', va: 0x10218110, id: 'sba_analyze_pass1',
+    role: 'stage', pixelBuffer: true,
+    desc: 'AnsSbaCapabilityImpl::analyzePass1 (fcn.10218110, __thiscall, ' +
+          'ecx = AnsSbaCapabilityImpl). PROVEN to fire on the REGULAR SBA path ' +
+          '(sba_order_fpo_calc returns into it 12x @ retaddr 0x102196ae). The ' +
+          'frame->grid (frame+0x1a) is already populated at entry -- this ' +
+          'function only READS it -- so the grid PRODUCER runs upstream and is ' +
+          'unhooked. LATCH hook: dumps the capability head (ecx+0), the ' +
+          'arg0/arg1 AnsImageData headers and arg0 pixels (*(arg0+0x20)) to ' +
+          'test whether arg0 reproduces measure_samples (=> the producer is ' +
+          'arg0\'s source, portable offline from one scan). OFF by default ' +
+          '(opt-in via hooks.cfg).',
+    cite: 'docs/74 sampler UPDATE 8/9; RE 2026-08-24, /tmp/pakon_re/sampler/ + ' +
+          '/tmp/pakon_re/v56build/, PakonIMAu.dll md5 ' +
+          'eea9dcf78ee21d4f7c515a6c2512242d: r2 af+pdf real function boundary ' +
+          '(6312 B, 0x10218110-0x102199b8), embedded string ' +
+          '"AnsSbaCapabilityImpl::analyzePass1()" @0x1059e1b0. Prologue ' +
+          '55 8B EC 6A FF 68 1F AD 53 10 = push ebp + mov ebp,esp + push -1 = ' +
+          '5 bytes / 3 whole position-independent instructions (no relative ' +
+          'jmp/call, no RIP-relative operand), MinHook 5-byte patch safe ' +
+          '(approximate=0). Runtime firing proof: ' +
+          'live_hooks_20260822-170343.jsonl (retaddr 0x102196ae x12).',
+  },
+  // HOOK 3 (bracket): CN balance-order driver, call-log only, no dump rows.
+  {
+    dll: 'PakonIMAu.dll', va: 0x10101220, id: 'cn_balance_order',
+    role: 'frame_boundary', pixelBuffer: false,
+    desc: 'ColorNegativePath::analyzeBalanceOrder (fcn.10101220, ' +
+          'cnMethods.cpp) -- the CN scene balance-order driver that acquires ' +
+          'the Sba/Fos capabilities and calls the analyzePass1 dispatcher ' +
+          '(fcn.10123980) at 0x101013da. Call-log BRACKET (no dump rows): its ' +
+          'enter/leave frames the unhooked frame->grid producer\'s call site ' +
+          'in the timeline relative to sba_analyze_pass1. OFF by default ' +
+          '(opt-in via hooks.cfg).',
+    cite: 'docs/74 sampler UPDATE 8/9; RE 2026-08-24, /tmp/pakon_re/v56build/, ' +
+          'PakonIMAu.dll md5 eea9dcf78ee21d4f7c515a6c2512242d: r2 af+pdf real ' +
+          'function boundary (5579 B, 0x10101220-0x101027eb) containing ' +
+          'call 0x10123980 @0x101013da; embedded strings ' +
+          '"ColorNegativePath::analyzeBalanceOrder" @0x10586d3c and "Sba ' +
+          'capability not found." @0x1057a46c. Prologue 6A FF 68 D2 15 52 10 = ' +
+          'push -1 + push 0x105215d2 = 7 bytes / 2 whole push-immediate ' +
+          'instructions (no relative jmp/call, no RIP-relative operand), ' +
+          'MinHook 5-byte patch safe (approximate=0).',
+  },
+
+  // ---- v60: TWO acquisition-side TLB.dll captures in ONE fresh scan ----
+  //
+  // HOOK A -- pre-scan AFE dark-line read-back, to VALIDATE the byte-exact
+  // convergence f recovered in tools/pakon_vendor_prescan.py (commit f43f61d).
+  // fcn.1001d4c0 is the dark-offset REDUCE leaf FN_bCalibrateFindDarkOffset
+  // (fcn.1001e1c0) calls 3x/iteration (R/G/B): reduce(int32 *buf, start, end,
+  // scale) = round(sum(buf[start..end))/((end-start)*scale)) = the per-channel
+  // reduced BLACK driving offset += round((black-300)*-3/112). buf = first
+  // stack arg (0-deref); start/end/scale free in stack_dwords; reduced black =
+  // EAX free on exit. Pair offline with tlb_afe_offset_write. OFF by default.
+  {
+    dll: 'TLB.dll', va: 0x1001d4c0, id: 'tlb_prescan_dark_reduce',
+    role: 'stage', pixelBuffer: false,
+    desc: 'AFE dark-offset REDUCE leaf (fcn.1001d4c0) -- reduce(int32 *buf, ' +
+          'int start, int end, int scale) = round(sum(buf[start..end), ' +
+          'unsigned-corrected) / ((end-start)*scale)), the per-channel reduced ' +
+          'BLACK that drives PSI\'s offset update offset += ' +
+          'round((black-300)*-3/112) (commit f43f61d, docs/72). Called 3x/' +
+          'iteration (R/G/B) by FN_bCalibrateFindDarkOffset (fcn.1001e1c0 @ ' +
+          '0x1001e30e/0x1001e371/0x1001e3d4). Hooked here (not the SEH-prologue ' +
+          'acquire fcn.1001d590) because the dark-line buffer is the CLEANEST ' +
+          'arg: buf = arg1 = stack_dwords[0], a plain int32-array pointer ' +
+          '(0 extra deref); start/end/scale = stack_dwords[1]/[2]/[3] (free on ' +
+          'entry); reduced black = EAX (free on exit). This is the READING ' +
+          'paired offline with each tlb_afe_offset_write (0x100299c0) to ' +
+          'validate afe_offset_next reproduces PSI\'s trajectory. OFF by ' +
+          'default (opt-in via hooks.cfg); <=24 calls at pre-scan calibration, ' +
+          'not a hot path. wantExitDefault=1 (EAX = reduced black).',
+    cite: 'commit f43f61d (tools/pakon_vendor_prescan.py), docs/72; r2 af+pdf ' +
+          '2026-08-25 vs TLB.dll md5 193d9b2ce0a4b77ae9b78262bd06c0fc: ' +
+          'fcn.1001d4c0 real function boundary (208 B, 0x1001d4c0-0x1001d58d, ' +
+          'ret 0x10), buffer indexed `fild dword [edi+edx*4]` with edi=arg1; ' +
+          '3 real E8/CALL xrefs from fcn.1001e1c0 (exit swap safe, ' +
+          'notCallReachable=0). Prologue 8B 54 24 08 + DD 05 C8 C1 05 10 = mov ' +
+          'edx,[esp+8] (4 B) + fld qword [0x1005c1c8] (6 B, x86-32 absolute ' +
+          'disp32 not RIP-relative) = 2 whole position-independent ' +
+          'instructions, MinHook 5-byte patch safe (approximate=0).',
+  },
+
+  // HOOK B -- the reduced-res AREA image builder (bit-exact colour source;
+  // docs/74 sampler UPDATE 15). fcn.100013b0 builds the 245x367x3 planar
+  // working image from the reduced-res scan source (de-interleave + inversion-
+  // LUT + orient; calls tlb_lut_apply 3x/row, no scale-down). FIRES 6x/scan,
+  // vtable-dispatched (call [eax+0x44]). Geometry descriptor = 2nd stack arg
+  // (stack_dwords[1]): src dims @+0x2c/+0x30, orient @+0x38, plane base @+0x58.
+  // ON_ENTRY dumps geom_desc + the raw source planes via *(desc+0x58); src_w
+  // ~250 confirms the reduced-res model. OFF by default.
+  {
+    dll: 'TLB.dll', va: 0x100013b0, id: 'tlb_area_build',
+    role: 'stage', pixelBuffer: true,
+    desc: 'The per-frame de-interleave + inversion-LUT + orient kernel ' +
+          '(fcn.100013b0) that builds the 245x367x3 planar working image from ' +
+          'the reduced-res scan source (docs/74 sampler UPDATE 15). Calls ' +
+          'tlb_lut_apply (0x10022a60) 3x/output-row and only strides pointers ' +
+          'between -- a 1:1 line copy of an already-reduced ~250-wide source, ' +
+          'NOT a scale-down; FIRES 6x per fresh scan (1/frame), ' +
+          'vtable-dispatched (call [eax+0x44]). ecx=this (LUT/source provider); ' +
+          'the GEOMETRY DESCRIPTOR is the 2nd stack arg = stack_dwords[1] (src ' +
+          'dims @+0x2c/+0x30, orient @+0x38, plane base @+0x58). Hooked ' +
+          'ON_ENTRY: geom_desc (STACK_PTR idx 1, READ FIRST -- src_w ~250 not ' +
+          '4093/2000 proves the reduced-res-acquisition model) and src_plane0 ' +
+          '(DEREF_PTR *(desc+0x58) = the raw reduced-res int16 source planes). ' +
+          'The output is already latched by tlb_polypixel / area_image_apply_lut ' +
+          'so no exit dump. OFF by default (opt-in via hooks.cfg): 6x/scan.',
+    cite: 'docs/74 /tmp/pakon_re/sampler/RESUME.md UPDATE 15; r2 af+pdf ' +
+          '2026-08-25 vs TLB.dll md5 193d9b2ce0a4b77ae9b78262bd06c0fc: ' +
+          'fcn.100013b0 real function boundary (1873 B, 0x100013b0-0x10001b01); ' +
+          'reads [ebx+0x2c]/[ebx+0x30]/[ebx+0x38]/[ebx+0x58] with ebx = 2nd ' +
+          'stack arg (`mov ebx,[esp+0x2c]` after sub esp,0x20; push ebx), calls ' +
+          'tlb_lut_apply x3/row at 0x100018f8/0x10001913/0x10001930. Prologue ' +
+          '83 EC 20 53 8B 5C 24 2C = sub esp,0x20 (3 B) + push ebx (1 B) + mov ' +
+          'ebx,[esp+0x2c] (4 B) = 3 whole position-independent instructions ' +
+          '(8 B), no relative jmp/call, MinHook 5-byte patch safe ' +
+          '(approximate=0). Entry-only so no exit swap (notCallReachable=0).',
+  },
 ];
 
 // ---------------------------------------------------------------------
